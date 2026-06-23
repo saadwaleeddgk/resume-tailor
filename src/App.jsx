@@ -305,22 +305,46 @@ const store = {
 /* ------------------------------------------------------------------ */
 /*  Claude API helpers (Claude-in-Claude)                              */
 /* ------------------------------------------------------------------ */
-async function callClaude(system, userText){
-  const res = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      system,
-      messages: [{ role: "user", content: userText }],
-    }),
-  });
-  if(!res.ok) throw new Error("Request failed (" + res.status + ")");
-  const data = await res.json();
-  const text = (data.content || []).map(b => (b && b.type === "text" ? b.text : "")).join("");
-  if(!text) throw new Error("Empty response");
-  return text;
+async function callClaude(system, userText, maxTokens = 2500){
+  let lastErr;
+  for(let attempt = 0; attempt < 3; attempt++){
+    let res;
+    try {
+      res = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: maxTokens,
+          system,
+          messages: [{ role: "user", content: userText }],
+        }),
+      });
+    } catch (e) {
+      lastErr = e;
+      await new Promise(r => setTimeout(r, 1200 * (attempt + 1)));
+      continue;
+    }
+    // 503 = backend tried every provider and they were all busy. Surface the real
+    // reason the server reported (e.g. missing keys, or which providers 429'd), and retry.
+    if(res.status === 503){
+      let msg = "The model providers are busy right now.";
+      try {
+        const j = await res.json();
+        if(j && j.error) msg = j.error;
+        if(j && Array.isArray(j.tried) && j.tried.length) msg += ` (tried: ${j.tried.join(", ")})`;
+      } catch {}
+      lastErr = new Error(msg);
+      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      continue;
+    }
+    if(!res.ok) throw new Error("Request failed (" + res.status + ")");
+    const data = await res.json();
+    const text = (data.content || []).map(b => (b && b.type === "text" ? b.text : "")).join("");
+    if(!text) throw new Error("Empty response");
+    return text;
+  }
+  throw lastErr || new Error("The model providers are busy — please try again in a moment.");
 }
 function parseJSON(s){
   if(!s) return null;
@@ -331,6 +355,166 @@ function parseJSON(s){
   catch { try { return JSON.parse(t.replace(/,\s*([}\]])/g, "$1")); } catch { return null; } }
 }
 async function withRetry(fn, n=1){ let e; for(let i=0;i<=n;i++){ try { return await fn(); } catch(err){ e=err; } } throw e; }
+
+/* ------------------------------------------------------------------ */
+/*  PDF export — walks the rendered resume sheet and emits REAL TEXT   */
+/*  (selectable, not an image). No html2canvas, no print dialog.       */
+/*  Honors the live DOM, so manual edits + the chosen template's       */
+/*  fonts/alignment carry through.                                     */
+/* ------------------------------------------------------------------ */
+async function buildResumePDF(sheetEl){
+  const { jsPDF } = await import("jspdf");
+  const doc = new jsPDF({ unit: "pt", format: "letter", compress: true });
+
+  const PAGE_W = doc.internal.pageSize.getWidth();   // 612pt (8.5in)
+  const PAGE_H = doc.internal.pageSize.getHeight();  // 792pt (11in)
+  const M = 40;                                      // ≈0.55in margin (matches @page)
+  const MAXW = PAGE_W - M * 2;
+  const LH = 1.32;
+  const INK = [21, 24, 29], SOFT = [58, 63, 71];
+
+  // serif vs sans, read from the actually-rendered template
+  const fam = (getComputedStyle(sheetEl).fontFamily || "").toLowerCase();
+  const isSerif = /(serif|times|georgia|palatino|garamond|hoefler|iowan|antiqua)/.test(fam) && !/sans/.test(fam);
+  const FONT = isSerif ? "times" : "helvetica";
+
+  // Read an element's actual rendered color so colored templates (accent, modern,
+  // etc.) carry their real text/accent colors into the PDF instead of going black.
+  const parseRGB = (str, fallback) => {
+    const m = (str || "").match(/rgba?\(([^)]+)\)/);
+    if (!m) return fallback;
+    const parts = m[1].split(",").map(s => parseFloat(s.trim()));
+    if (parts.length >= 4 && parts[3] === 0) return fallback; // fully transparent → fallback
+    const [r, g, b] = parts;
+    if ([r, g, b].some(n => Number.isNaN(n))) return fallback;
+    return [Math.round(r), Math.round(g), Math.round(b)];
+  };
+  const colorOf = (el, fallback) => parseRGB(getComputedStyle(el).color, fallback || INK);
+  const borderColorOf = (el, side, fallback) => parseRGB(getComputedStyle(el)[`border${side}Color`], fallback || [40, 40, 40]);
+
+  let y = M;
+  const ensure = (h) => { if (y + h > PAGE_H - M) { doc.addPage(); y = M; } };
+  const measure = (w) => { doc.setFont(FONT, w.style); doc.setFontSize(w.size); return doc.getTextWidth(w.t); };
+  const spaceW = (size, style) => { doc.setFont(FONT, style); doc.setFontSize(size); return doc.getTextWidth(" "); };
+
+  // word-wrapping writer for a run of styled segments: [{text, style, size, color}]
+  function writeRich(segments, { indent = 0, rightReserve = 0, gapAfter = 4, align = "left" } = {}){
+    const words = [];
+    segments.forEach(seg => {
+      const txt = (seg.text || "").replace(/\s+/g, " ").trim();
+      if (!txt) return;
+      txt.split(" ").forEach(t => words.push({ t, style: seg.style || "normal", size: seg.size || 10, color: seg.color || INK }));
+    });
+    if (!words.length) return;
+
+    let line = [], lineW = 0, firstLine = true;
+    const flush = () => {
+      if (!line.length) return;
+      const maxSize = Math.max(...line.map(w => w.size));
+      const lineH = maxSize * LH;
+      ensure(lineH);
+      const baseY = y + maxSize;
+      let total = 0;
+      line.forEach((w, i) => { total += measure(w) + (i ? spaceW(w.size, w.style) : 0); });
+      let x = align === "center" ? (PAGE_W - total) / 2 : M + indent;
+      line.forEach((w, i) => {
+        if (i) x += spaceW(w.size, w.style);
+        doc.setFont(FONT, w.style); doc.setFontSize(w.size); doc.setTextColor(w.color[0], w.color[1], w.color[2]);
+        doc.text(w.t, x, baseY); x += measure(w);
+      });
+      y += lineH; line = []; lineW = 0; firstLine = false;
+    };
+    words.forEach(w => {
+      const ww = measure(w);
+      const sp = line.length ? spaceW(w.size, w.style) : 0;
+      const limit = MAXW - indent - (firstLine ? rightReserve : 0);
+      if (line.length && lineW + sp + ww > limit) flush();
+      line.push(w); lineW += (line.length > 1 ? spaceW(w.size, w.style) : 0) + ww;
+    });
+    flush();
+    y += gapAfter;
+  }
+
+  const isCentered = (el) => getComputedStyle(el).textAlign === "center";
+
+  function heading(el){
+    const cs = getComputedStyle(el);
+    const bb = parseFloat(cs.borderBottomWidth) > 0;
+    const bt = parseFloat(cs.borderTopWidth) > 0;
+    const bl = parseFloat(cs.borderLeftWidth) > 0;
+    const rule = bb || bt;
+    const txtColor = colorOf(el, INK);
+    const ruleColor = bb ? borderColorOf(el, "Bottom", txtColor) : borderColorOf(el, "Top", txtColor);
+    y += 6;
+    // left accent bar (e.g. the "accent" template) drawn beside the heading text
+    if (bl) {
+      const barColor = borderColorOf(el, "Left", txtColor);
+      ensure(12);
+      doc.setFillColor(barColor[0], barColor[1], barColor[2]);
+      doc.rect(M, y, 3, 10, "F");
+    }
+    writeRich([{ text: el.textContent.toUpperCase(), style: "bold", size: 10.5, color: txtColor }],
+      { indent: bl ? 9 : 0, gapAfter: rule ? 3 : 4, align: isCentered(el) ? "center" : "left" });
+    if (rule) { ensure(6); doc.setDrawColor(ruleColor[0], ruleColor[1], ruleColor[2]); doc.setLineWidth(0.8); doc.line(M, y, PAGE_W - M, y); y += 6; }
+  }
+
+  function roleLine(el){
+    ensure(15); // keep role + dates on the same page/line
+    const datesEl = el.querySelector(".r-dates");
+    const roleEl  = el.querySelector(".r-role");
+    const subEl   = el.querySelector(".r-sub");
+    const dates = (datesEl?.textContent || "").trim();
+    const role  = (roleEl?.textContent || "").trim() || el.textContent.trim();
+    const sub   = (subEl?.textContent || "").trim();
+    const roleColor = roleEl ? colorOf(roleEl, INK) : colorOf(el, INK);
+    const subColor  = subEl ? colorOf(subEl, SOFT) : SOFT;
+    const dateColor = datesEl ? colorOf(datesEl, SOFT) : SOFT;
+    doc.setFont(FONT, "normal"); doc.setFontSize(9);
+    const dW = dates ? doc.getTextWidth(dates) : 0;
+    const startY = y;
+    writeRich(
+      [ role ? { text: role, style: "bold", size: 10.5, color: roleColor } : null,
+        sub  ? { text: sub,  style: "normal", size: 10, color: subColor } : null ].filter(Boolean),
+      { rightReserve: dW ? dW + 14 : 0, gapAfter: 2 }
+    );
+    if (dates) { doc.setFont(FONT, "normal"); doc.setFontSize(9); doc.setTextColor(dateColor[0], dateColor[1], dateColor[2]); doc.text(dates, PAGE_W - M, startY + 10.5, { align: "right" }); }
+  }
+
+  function bullet(li){
+    const text = (typeof li === "string" ? li : li.textContent).trim();
+    const col = (typeof li === "string") ? INK : colorOf(li, INK);
+    ensure(10 * LH);
+    doc.setFont(FONT, "normal"); doc.setFontSize(10); doc.setTextColor(col[0], col[1], col[2]);
+    doc.text("\u2022", M + 4, y + 10);
+    writeRich([{ text, style: "normal", size: 10, color: col }], { indent: 14, gapAfter: 2 });
+  }
+
+  function walk(node){
+    Array.from(node.children).forEach(el => {
+      if (el.classList.contains("no-print") || el.classList.contains("isug")) return;
+      const tag = el.tagName;
+      if (el.classList.contains("r-header")) { walk(el); y += 4; return; }
+      if (el.classList.contains("r-name"))    { writeRich([{ text: el.textContent.trim(), style: "bold", size: 20, color: colorOf(el, INK) }], { gapAfter: 2, align: isCentered(el) ? "center" : "left" }); return; }
+      if (el.classList.contains("r-title"))   { writeRich([{ text: el.textContent.trim(), style: "normal", size: 11, color: colorOf(el, SOFT) }], { gapAfter: 3, align: isCentered(el) ? "center" : "left" }); return; }
+      if (el.classList.contains("r-contact")) { writeRich([{ text: el.textContent.trim(), style: "normal", size: 9, color: colorOf(el, SOFT) }], { gapAfter: 6, align: isCentered(el) ? "center" : "left" }); return; }
+      if (el.classList.contains("r-h2"))      { heading(el); return; }
+      if (el.classList.contains("r-sum") || el.classList.contains("r-skills")) { writeRich([{ text: el.textContent.trim(), style: "normal", size: 10, color: colorOf(el, INK) }], { gapAfter: 5 }); return; }
+      if (el.classList.contains("r-rowline")) { roleLine(el); return; }
+      if (el.classList.contains("r-block"))   { walk(el); y += 3; return; }
+      if (tag === "UL") { Array.from(el.children).forEach(li => { if (li.classList?.contains("no-print")) return; if (li.textContent.trim()) bullet(li); }); y += 2; return; }
+      if (tag === "P")  { const t = el.textContent.trim(); if (t) writeRich([{ text: t, size: 10, color: colorOf(el, INK) }], { gapAfter: 4 }); return; }
+      if (tag === "DIV"){
+        const roleSpan = el.querySelector(".r-role");
+        if (roleSpan) roleLine(el);
+        else { const t = el.textContent.trim(); if (t) writeRich([{ text: t, size: 10, color: colorOf(el, INK) }], { gapAfter: 3 }); }
+        return;
+      }
+    });
+  }
+
+  walk(sheetEl);
+  return doc.output("blob");
+}
 
 /* ------------------------------------------------------------------ */
 /*  Prompts                                                            */
@@ -349,17 +533,20 @@ HARD RULES:
 2) Integrate relevant keywords from the analysis naturally, only where the candidate genuinely has the experience. No keyword stuffing.
 3) Achievement-focused bullets: strong past-tense action verb + concrete action + measurable result/impact when the master provides it. Specific, human, concise. Avoid clichés and AI-sounding filler ("responsible for", "leveraged synergies", "results-driven professional").
 4) Pull the real name and contact details from the master resume; use "" for anything missing.
-5) Fill roughly two pages. Make the resume SUBSTANTIAL — do not over-condense. The summary and skills sections in particular must be rich, never minimal.
-6) SUMMARY: write a strong 4-5 sentence professional summary that opens with the candidate's title/seniority and years of experience, names their core domains, weaves in the most important JD keywords they genuinely match, and closes on the value they bring. Specific and confident, never generic filler.
-7) SKILLS: be comprehensive — list 14-22 of the candidate's REAL skills (hard skills, tools, platforms, frameworks, methods, domain knowledge) that align with the JD, ordered by JD relevance. Pull skills evidenced anywhere in the master resume, not just from an existing skills line.
+4b) LOCATIONS — strict: the candidate's personal/header location is a CONTACT field only. Do NOT reuse it (or any guessed city/state) as a job or school location. For each experience and education entry, set "location" ONLY if the master resume explicitly states a location for THAT specific entry; otherwise return "" for that entry's location. Never infer, fill, or fabricate a location.
+5) LENGTH: produce a SUBSTANTIAL two-page resume. Never over-condense. Every JD-relevant experience entry should carry 4-6 achievement bullets, with the most recent / most relevant roles getting the fullest treatment.
+6) SUMMARY: write a rich professional summary of 120-150 words (5-7 full sentences) — this is a hard minimum, do not write a short summary. Open with the candidate's title/seniority and total years of experience, name their core domains and standout strengths, weave in the JD's most important keywords they genuinely match, reference the type of measurable impact they deliver, and close on the value they bring to THIS specific role. Confident and specific, never generic filler or padding.
+7) SKILLS: be comprehensive and JD-driven. Scan the ENTIRE master resume (summary, every experience bullet, projects, tools, education) and surface 16-24 of the candidate's REAL skills that align with the JD — hard skills, tools, platforms, frameworks, languages, methodologies, domain knowledge. Use the JD's OWN wording for matching terms so the ATS detects them, and order strictly by JD relevance (most-weighted JD keywords first). Do NOT just copy the master's existing skills line — rebuild it specifically for this JD and include every genuinely-applicable skill the candidate evidences anywhere.
+8) TAILOR EVERY SECTION to the JD, not only the skills line: reframe the professional title toward the target role, and rewrite each role's bullets to lead with the responsibilities, technologies, and keywords the JD emphasizes (only where the candidate genuinely did that work). Surface the JD-relevant parts of their experience first.
+9) TONE: natural, human, and professional — write the way an experienced person describes their own work. Vary sentence structure and rhythm, use concrete real-world detail, and avoid robotic or AI-sounding phrasing, clichés, and buzzword filler.
 Return ONLY minified JSON with keys:
 name, title (a target-aligned professional title grounded in the candidate's real experience),
 contact { email, phone, location, links (string[]) },
-summary (a rich 4-5 sentence factual professional summary, per rule 6),
-coreSkills (string[]: 14-22 relevant skills per rule 7, ordered by JD relevance),
-experience (array of { company, role, location, start, end, bullets (string[] of 4-6 tailored bullets) }),
+summary (a rich 120-150 word factual professional summary, per rule 6),
+coreSkills (string[]: 16-24 relevant skills per rule 7, ordered by JD relevance),
+experience (array of { company, role, location (only if the master states it for THIS entry, else ""), start, end, bullets (string[] of 4-6 tailored bullets) }),
 projects (array of { name, detail, tech (string[]) } — only if present in the master, else []),
-education (array of { credential, school, location, year }),
+education (array of { credential, school, location (only if the master states it for THIS entry, else ""), year }),
 certifications (string[]),
 additional (string[]: e.g. languages, awards, publications — only if present, else []).
 Output compact JSON only.`;
@@ -395,8 +582,10 @@ storiesToTell (string[]: specific experiences from the resume to develop into ST
 const SYS_SUGGEST = `You are an ATS optimization assistant. Given the JD ANALYSIS and the current TAILORED RESUME, propose concrete, ready-to-apply improvements that would raise the resume's keyword match and ATS score.
 RULES:
 - Prefer rephrasing/strengthening existing content and weaving in missing JD keywords where the candidate plausibly already has the experience.
+- SKILLS COVERAGE (important): go through the JD ANALYSIS hardSkills, tools, and keywords one by one. For EVERY term that is missing from the current resume's skills/content but that the candidate plausibly has given their background, emit a separate add_skill suggestion. Do not stop after a few — cover all genuinely-applicable missing keywords so nothing important is left out.
+- SUMMARY: any rewrite_summary suggestion must itself be a rich 120-150 word summary (5-7 sentences), not a short one.
 - Do NOT fabricate. If a suggestion asserts a new skill, tool, or experience the resume doesn't already show, set "needsVerification": true so the user can confirm it's true before accepting.
-- Each suggestion must be specific and self-contained (real text the user can drop straight in), in the candidate's voice, achievement-focused, no clichés.
+- Each suggestion must be specific and self-contained (real text the user can drop straight in), in the candidate's natural human voice, achievement-focused, no clichés or AI-sounding filler.
 - Use the candidate's REAL company names from the resume for experience suggestions.
 Return ONLY minified JSON, an object: { "suggestions": [ {
   "id": <short unique string>,
@@ -409,7 +598,7 @@ Return ONLY minified JSON, an object: { "suggestions": [ {
   "reason": <one short sentence: why it helps the match/ATS>,
   "needsVerification": <true if it claims something new the user must confirm, else false>
 } ] }
-Give 7-12 high-impact suggestions spread across summary, skills, the key experience entries, projects, and missing keywords. Prioritize the keywords the JD weights most.`;
+Give 10-18 high-impact suggestions, with thorough coverage of missing skills plus improvements spread across summary, the key experience entries, projects, and certifications. Prioritize the keywords the JD weights most, but do not leave genuinely-applicable JD skills uncovered.`;
 
 /* ------------------------------------------------------------------ */
 /*  Scoring (deterministic — transparent, not magic numbers)           */
@@ -672,6 +861,7 @@ function ResumeApp(){
   const [pages, setPages] = useState(null);
   const [editing, setEditing] = useState(false);
   const [editedHTML, setEditedHTML] = useState(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   const [cover, setCover] = useState("");
   const [coverBusy, setCoverBusy] = useState(false);
@@ -785,7 +975,8 @@ function ResumeApp(){
       setStage("Tailoring your resume to the role");
       const tailored = parseJSON(await withRetry(() => callClaude(
         SYS_TAILOR,
-        `MASTER RESUME:\n${master}\n\nJD ANALYSIS:\n${JSON.stringify(analysis)}`
+        `MASTER RESUME:\n${master}\n\nJD ANALYSIS:\n${JSON.stringify(analysis)}`,
+        5000
       )));
       if(!tailored) throw new Error("Could not generate the tailored resume. Try again.");
 
@@ -830,7 +1021,8 @@ function ResumeApp(){
         : "\n\nLENGTH DIRECTIVE: The current resume runs long. Tighten it to fit cleanly within two pages by trimming the least JD-relevant content and merging weaker bullets. Keep the strongest, most relevant material.";
       const tailored = parseJSON(await withRetry(() => callClaude(
         SYS_TAILOR,
-        `MASTER RESUME:\n${master}\n\nJD ANALYSIS:\n${JSON.stringify(result.analysis)}${directive}`
+        `MASTER RESUME:\n${master}\n\nJD ANALYSIS:\n${JSON.stringify(result.analysis)}${directive}`,
+        5000
       )));
       if(!tailored) throw new Error("Could not adjust the length. Try again.");
       const assess = parseJSON(await withRetry(() => callClaude(
@@ -916,7 +1108,24 @@ function ResumeApp(){
     setEditedHTML(null); setEditing(false);
   };
 
-  const downloadPDF = () => { window.print(); };
+  const downloadPDF = async () => {
+    if(!sheetRef.current) return;
+    setPdfBusy(true); setError("");
+    try {
+      const name = (result?.tailored?.name || "resume").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const role = (jobTitle || result?.analysis?.jobTitle || "role").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const blob = await buildResumePDF(sheetRef.current);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${name}-${role}-resume.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } catch (e) {
+      setError("Couldn't build the PDF (" + (e?.message || e) + "). If this persists, make sure the 'jspdf' package is installed.");
+    } finally {
+      setPdfBusy(false);
+    }
+  };
   const toggleEdit = () => {
     if (sheetRef.current) setEditedHTML(sheetRef.current.innerHTML); // snapshot current content (structured or edited)
     setEditing(e => !e); setShowSug(false);
@@ -1034,33 +1243,11 @@ function ResumeApp(){
               </div>
             </div>
 
-            {/* template */}
-            <div className="rb-card">
-              <div className="rb-ch">
-                <div className="ico"><Layers size={16} /></div>
-                <div><div className="eyebrow">Step 2</div><h2>Choose a template</h2></div>
-              </div>
-              <div className="rb-cb">
-                <div className="rb-tpls">
-                  {TEMPLATES.map(tp => (
-                    <button key={tp.id} className={"rb-tpl" + (tpl === tp.id ? " sel" : "")} onClick={() => pickTemplate(tp.id)}>
-                      <div className="nm">{tp.name}{tpl === tp.id && <Check size={14} style={{ color: "var(--green)" }} />}</div>
-                      <div className="ds">{tp.desc}</div>
-                      <div className={"rb-mini " + tp.mini.join(" ")}>
-                        <div className="ln t" /><div className="ln" /><div className="ln h" /><div className="ln" /><div className="ln" style={{ width: "70%" }} />
-                      </div>
-                    </button>
-                  ))}
-                </div>
-                <p className="rb-hint">All eight are single-column and parser-safe. They differ in type and spacing — never in ATS compatibility.</p>
-              </div>
-            </div>
-
-            {/* JD */}
+ {/* JD */}
             <div className="rb-card">
               <div className="rb-ch">
                 <div className="ico"><Target size={16} /></div>
-                <div><div className="eyebrow">Step 3</div><h2>Paste the job description</h2></div>
+                <div><div className="eyebrow">Step 2</div><h2>Paste the job description</h2></div>
               </div>
               <div className="rb-cb">
                 <div className="rb-row2" style={{ marginBottom: 10 }}>
@@ -1080,6 +1267,29 @@ function ResumeApp(){
                 {error && <div className="rb-err"><AlertTriangle size={15} style={{ flex: "none", marginTop: 1 }} />{error}</div>}
               </div>
             </div>
+
+            {/* template */}
+            <div className="rb-card">
+              <div className="rb-ch">
+                <div className="ico"><Layers size={16} /></div>
+                <div><div className="eyebrow">Step 3</div><h2>Choose a template</h2></div>
+              </div>
+              <div className="rb-cb">
+                <div className="rb-tpls">
+                  {TEMPLATES.map(tp => (
+                    <button key={tp.id} className={"rb-tpl" + (tpl === tp.id ? " sel" : "")} onClick={() => pickTemplate(tp.id)}>
+                      <div className="nm">{tp.name}{tpl === tp.id && <Check size={14} style={{ color: "var(--green)" }} />}</div>
+                      <div className="ds">{tp.desc}</div>
+                      <div className={"rb-mini " + tp.mini.join(" ")}>
+                        <div className="ln t" /><div className="ln" /><div className="ln h" /><div className="ln" /><div className="ln" style={{ width: "70%" }} />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <p className="rb-hint">All eight are single-column and parser-safe. They differ in type and spacing — never in ATS compatibility.</p>
+              </div>
+            </div>
+
           </div>
 
           {/* RIGHT: results */}
@@ -1131,7 +1341,7 @@ function ResumeApp(){
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("expand")} disabled={busy || editing}><RefreshCw size={13} /> Fuller</button>
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("condense")} disabled={busy || editing}><RefreshCw size={13} /> Tighter</button>
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadHTML}><FileDown size={13} /> HTML</button>
-                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={downloadPDF}><Download size={13} /> Download PDF</button>
+                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={downloadPDF} disabled={pdfBusy}>{pdfBusy ? <><Loader2 size={13} className="spin" /> Building…</> : <><Download size={13} /> Download PDF</>}</button>
                       </div>
                     </div>
 
