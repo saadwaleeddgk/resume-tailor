@@ -1,4 +1,5 @@
 const PROVIDERS = [
+  { name: "openai", endpoint: "https://api.openai.com/v1/chat/completions",                              key: process.env.OPENAI_API_KEY, model: "gpt-4o-mini" },
   { name: "groq",   endpoint: "https://api.groq.com/openai/v1/chat/completions",                          key: process.env.GROQ_API_KEY,   model: "llama-3.3-70b-versatile" },
   { name: "gemini", endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", key: process.env.GEMINI_API_KEY, model: "gemini-2.5-flash-lite" },
   { name: "gpt",    endpoint: "https://models.github.ai/inference/chat/completions",                      key: process.env.GITHUB_TOKEN,   model: "openai/gpt-4o-mini" },

@@ -12,6 +12,7 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 const PROVIDERS = [
+  { name: "openai", endpoint: "https://api.openai.com/v1/chat/completions",                              key: process.env.OPENAI_API_KEY, model: "gpt-4o-mini" },
   { name: "groq",   endpoint: "https://api.groq.com/openai/v1/chat/completions",                          key: process.env.GROQ_API_KEY,   model: "llama-3.3-70b-versatile" },
   { name: "gemini", endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", key: process.env.GEMINI_API_KEY, model: "gemini-2.5-flash-lite" },
   { name: "gpt",    endpoint: "https://models.github.ai/inference/chat/completions",                      key: process.env.GITHUB_TOKEN,   model: "openai/gpt-4o-mini" },
@@ -80,8 +81,8 @@ app.post("/api/claude", async (req, res) => {
     const messages = [];
     if (req.body.system) messages.push({ role: "system", content: req.body.system });
     (req.body.messages || []).forEach(m => messages.push({ role: m.role, content: m.content }));
-    const { r, provider, error } = await callLLM({ max_tokens: clampTokens(req.body.max_tokens), messages });
-    if (!r) { console.log("Failover failed:", error); return res.status(503).json({ error }); }
+    const { r, provider, error, tried } = await callLLM({ max_tokens: clampTokens(req.body.max_tokens), messages });
+    if (!r) { console.log("Failover failed:", error, tried || ""); return res.status(503).json({ error, tried }); }
     const data = await r.json();
     if (!r.ok) { console.log(`${provider} said:`, JSON.stringify(data)); return res.status(r.status).json(data); }
     const text = data?.choices?.[0]?.message?.content || "";
