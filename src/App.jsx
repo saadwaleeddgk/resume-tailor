@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   FileText, Sparkles, Download, Upload, Check, X, AlertTriangle,
   RefreshCw, ChevronRight, Eye, Layers, History, Mail, MessageSquare,
-  Loader2, FileDown, RotateCcw, Target, ShieldCheck, ScanLine, Trash2, Pencil
+  Loader2, FileDown, RotateCcw, Target, ShieldCheck, ScanLine, Trash2, Pencil, Send, Plus
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -128,7 +128,9 @@ textarea.rb-ta:focus,input.rb-in:focus{outline:2px solid var(--green);outline-of
 .sheet .r-contact{font-size:11.6px;color:#3a3f47;margin:0 0 6px;}
 .sheet .r-h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;border-bottom:1.5px solid #15181d;padding-bottom:3px;margin:15px 0 7px;}
 .sheet p.r-sum{margin:0 0 4px;}
-.sheet .r-skills{margin:0;}
+.sheet .r-skills{margin:0 0 2px;}
+.sheet .r-skills:last-of-type{margin-bottom:0;}
+.sheet .r-skills .r-cat{font-weight:700;}
 .sheet .r-block{break-inside:avoid;margin-bottom:9px;}
 .sheet .r-rowline{display:flex;justify-content:space-between;gap:14px;align-items:baseline;}
 .sheet .r-role{font-weight:700;}
@@ -187,6 +189,10 @@ textarea.rb-ta:focus,input.rb-in:focus{outline:2px solid var(--green);outline-of
 .chip{font-family:var(--mono);font-size:11.5px;padding:4px 9px;border-radius:7px;border:1px solid var(--line-2);background:var(--card-2);color:var(--ink-soft);}
 .chip.ok{background:var(--green-tint);border-color:#bcdccf;color:var(--green-ink);}
 .chip.miss{background:var(--amber-tint);border-color:#e7d2ab;color:var(--amber);}
+button.chip{cursor:pointer;font-family:var(--mono);line-height:1.2;display:inline-flex;align-items:center;}
+button.chip.chip-add{border-style:dashed;transition:background .12s,border-color .12s,transform .04s;}
+button.chip.chip-add:hover{background:var(--green-tint);border-color:#bcdccf;color:var(--green-ink);}
+button.chip.chip-add:active{transform:translateY(1px);}
 .rb-list{list-style:none;margin:0;padding:0;}
 .rb-list li{font-size:13px;line-height:1.5;padding:7px 0;border-bottom:1px solid var(--line-2);display:flex;gap:9px;align-items:flex-start;color:var(--ink-soft);}
 .rb-list li:last-child{border-bottom:none;}
@@ -498,7 +504,22 @@ async function buildResumePDF(sheetEl){
       if (el.classList.contains("r-title"))   { writeRich([{ text: el.textContent.trim(), style: "normal", size: 11, color: colorOf(el, SOFT) }], { gapAfter: 3, align: isCentered(el) ? "center" : "left" }); return; }
       if (el.classList.contains("r-contact")) { writeRich([{ text: el.textContent.trim(), style: "normal", size: 9, color: colorOf(el, SOFT) }], { gapAfter: 6, align: isCentered(el) ? "center" : "left" }); return; }
       if (el.classList.contains("r-h2"))      { heading(el); return; }
-      if (el.classList.contains("r-sum") || el.classList.contains("r-skills")) { writeRich([{ text: el.textContent.trim(), style: "normal", size: 10, color: colorOf(el, INK) }], { gapAfter: 5 }); return; }
+      if (el.classList.contains("r-sum")) { writeRich([{ text: el.textContent.trim(), style: "normal", size: 10, color: colorOf(el, INK) }], { gapAfter: 5 }); return; }
+      if (el.classList.contains("r-skills")) {
+        const col = colorOf(el, INK);
+        const lab = el.querySelector(".r-cat");
+        if (lab) {
+          const labelText = lab.textContent;
+          const rest = el.textContent.slice(labelText.length).trim();
+          writeRich([
+            { text: labelText.trim() + " ", style: "bold", size: 10, color: col },
+            rest ? { text: rest, style: "normal", size: 10, color: col } : null,
+          ].filter(Boolean), { gapAfter: 3 });
+        } else {
+          writeRich([{ text: el.textContent.trim(), style: "normal", size: 10, color: col }], { gapAfter: 5 });
+        }
+        return;
+      }
       if (el.classList.contains("r-rowline")) { roleLine(el); return; }
       if (el.classList.contains("r-block"))   { walk(el); y += 3; return; }
       if (tag === "UL") { Array.from(el.children).forEach(li => { if (li.classList?.contains("no-print")) return; if (li.textContent.trim()) bullet(li); }); y += 2; return; }
@@ -536,14 +557,16 @@ HARD RULES:
 4b) LOCATIONS — strict: the candidate's personal/header location is a CONTACT field only. Do NOT reuse it (or any guessed city/state) as a job or school location. For each experience and education entry, set "location" ONLY if the master resume explicitly states a location for THAT specific entry; otherwise return "" for that entry's location. Never infer, fill, or fabricate a location.
 5) LENGTH: produce a SUBSTANTIAL two-page resume. Never over-condense. Every JD-relevant experience entry should carry 4-6 achievement bullets, with the most recent / most relevant roles getting the fullest treatment.
 6) SUMMARY: write a rich professional summary of 120-150 words (5-7 full sentences) — this is a hard minimum, do not write a short summary. Open with the candidate's title/seniority and total years of experience, name their core domains and standout strengths, weave in the JD's most important keywords they genuinely match, reference the type of measurable impact they deliver, and close on the value they bring to THIS specific role. Confident and specific, never generic filler or padding.
-7) SKILLS: be comprehensive and JD-driven. Scan the ENTIRE master resume (summary, every experience bullet, projects, tools, education) and surface 16-24 of the candidate's REAL skills that align with the JD — hard skills, tools, platforms, frameworks, languages, methodologies, domain knowledge. Use the JD's OWN wording for matching terms so the ATS detects them, and order strictly by JD relevance (most-weighted JD keywords first). Do NOT just copy the master's existing skills line — rebuild it specifically for this JD and include every genuinely-applicable skill the candidate evidences anywhere.
+7) SKILLS — PRESERVE, NEVER PRUNE (critical): Start by reproducing EVERY skill already listed in the master resume's skills section, exactly. Do NOT drop, cut, omit, generalize away, merge, or truncate any of them, and do NOT impose a maximum count — keep the master's original wording and order. THEN, scanning the WHOLE master (summary, every experience bullet, projects, tools, education), ADD any JD-required hard skills, tools, platforms, frameworks, languages, or methodologies that the candidate genuinely demonstrates but that are missing from the skills section, using the JD's OWN wording so the ATS detects them. The final skills list MUST be a SUPERSET of the master's skills (every original skill + the genuinely-applicable missing JD skills). It must NEVER be a filtered, shortened, or rebuilt subset. Only the newly-ADDED skills must be JD-justified; existing skills are kept regardless of JD relevance.
+   STRUCTURE — keep the master's grouping: If the master resume groups skills under labeled categories (e.g. "Cloud Platforms:", "ETL / ELT & Orchestration:", "Programming Languages:", "Databases:"), reproduce those EXACT category labels and groupings in skillCategories — every original skill under its original category — and slot each newly-added JD skill into the most fitting existing category. If the master lists skills as a single flat line with no categories, return skillCategories as [] and put everything in coreSkills. coreSkills must ALWAYS hold the COMPLETE flat, de-duplicated union of every skill (all categories combined plus any flat ones).
 8) TAILOR EVERY SECTION to the JD, not only the skills line: reframe the professional title toward the target role, and rewrite each role's bullets to lead with the responsibilities, technologies, and keywords the JD emphasizes (only where the candidate genuinely did that work). Surface the JD-relevant parts of their experience first.
 9) TONE: natural, human, and professional — write the way an experienced person describes their own work. Vary sentence structure and rhythm, use concrete real-world detail, and avoid robotic or AI-sounding phrasing, clichés, and buzzword filler.
 Return ONLY minified JSON with keys:
 name, title (a target-aligned professional title grounded in the candidate's real experience),
 contact { email, phone, location, links (string[]) },
 summary (a rich 120-150 word factual professional summary, per rule 6),
-coreSkills (string[]: 16-24 relevant skills per rule 7, ordered by JD relevance),
+coreSkills (string[]: the COMPLETE de-duplicated list of every skill — all of the master's existing skills PLUS any genuinely-applicable missing JD skills, per rule 7; never truncated, never a subset),
+skillCategories (array of { category (string: the master's exact category label, e.g. "Cloud Platforms"), skills (string[]: every skill under that category — originals preserved + any fitting JD additions) } — reproduce the master resume's skill groupings when it uses them; return [] when the master lists skills as a single flat line),
 experience (array of { company, role, location (only if the master states it for THIS entry, else ""), start, end, bullets (string[] of 4-6 tailored bullets) }),
 projects (array of { name, detail, tech (string[]) } — only if present in the master, else []),
 education (array of { credential, school, location (only if the master states it for THIS entry, else ""), year }),
@@ -571,6 +594,12 @@ Best regards,
 (the candidate's full name from the resume, on its own line)
 
 Body rules: ~250 words total. Warm, specific, confident. Open with genuine fit, give one or two concrete proof points drawn from the resume, close with a forward-looking line. No clichés, no fabricated details, no flattery padding, no markdown, no bracketed placeholders, no subject line, no address block, no date.`;
+
+const SYS_OUTREACH = `Write a short, professional COLD OUTREACH EMAIL the candidate can send directly to a recruiter, HR contact, or hiring manager about the target role. Use ONLY facts from the TAILORED RESUME and JD ANALYSIS — never invent employers, job titles, metrics, tools, or skills the resume does not show.
+This is NOT a cover letter: it is a brief, punchy email that opens a conversation. Keep it scannable on a phone.
+Return ONLY minified JSON (no markdown, no commentary) with keys:
+subject (string: a crisp, specific subject line under ~70 characters — name the target role and one standout strength; no clickbait, no ALL CAPS),
+body (string: the full plain-text email body. Begin with an editable greeting line such as "Hi there," or "Dear Hiring Team," (the sender can replace it with a real name). Then 2 short paragraphs, ~110-160 words TOTAL: paragraph 1 says who they are (current title + years of experience + the single most relevant strength) and the exact role/team they're reaching out about; paragraph 2 gives one or two concrete proof points from the resume that match the JD's most important needs, then a brief, polite call to action (a quick 15-minute call, or pointing to the attached/linked resume). End with a sign-off line and the candidate's full name from the resume on its own line. Separate paragraphs with real newline characters. Warm, confident, concise; no clichés, no buzzword filler, no markdown, no fabricated company names, and no bracketed placeholders other than the editable recipient greeting.).`;
 
 const SYS_INTERVIEW = `You are an interview coach. Generate preparation material grounded ONLY in the TAILORED RESUME and JD ANALYSIS.
 Return ONLY minified JSON with keys:
@@ -608,6 +637,7 @@ function resumeToText(r){
   if(!r) return "";
   const p = [r.name, r.title, r.summary];
   if(Array.isArray(r.coreSkills)) p.push(r.coreSkills.join(" "));
+  (r.skillCategories||[]).forEach(c => { p.push(c.category); if(Array.isArray(c.skills)) p.push(c.skills.join(" ")); });
   (r.experience||[]).forEach(e => { p.push(e.role, e.company, e.location); (e.bullets||[]).forEach(b => p.push(b)); });
   (r.projects||[]).forEach(pr => { p.push(pr.name, pr.detail); if(Array.isArray(pr.tech)) p.push(pr.tech.join(" ")); });
   (r.education||[]).forEach(ed => p.push(ed.credential, ed.school));
@@ -645,7 +675,7 @@ function atsChecklist(tailored, pages){
   const checks = [
     { ok: !!c.email, label: "Parseable contact details (email present)" },
     { ok: !!tailored.summary && (tailored.experience||[]).length > 0 && (tailored.education||[]).length > 0, label: "Standard sections detected (summary, experience, education)" },
-    { ok: (tailored.coreSkills||[]).length > 0, label: "Dedicated skills section for keyword matching" },
+    { ok: ((tailored.coreSkills||[]).length > 0) || ((tailored.skillCategories||[]).some(c => (c.skills||[]).length > 0)), label: "Dedicated skills section for keyword matching" },
     { ok: true, label: "Single-column layout (no tables, columns, or text boxes)" },
     { ok: true, label: "No images, icons, or graphics in parsed content" },
     { ok: true, label: "Standard fonts and plain bullet characters" },
@@ -662,7 +692,19 @@ function applySuggestion(tailored, s){
   if(s.action === "rewrite_summary"){ t.summary = s.text; }
   else if(s.action === "add_skill"){
     t.coreSkills = t.coreSkills || [];
-    if(!t.coreSkills.some(x => String(x).toLowerCase() === String(s.text).toLowerCase())) t.coreSkills.push(s.text);
+    const exists = t.coreSkills.some(x => String(x).toLowerCase() === String(s.text).toLowerCase());
+    if(!exists) t.coreSkills.push(s.text);
+    // If the resume uses categorized skills, keep the accepted skill visible by
+    // dropping it into an "Additional Skills" group (created once if needed).
+    if(Array.isArray(t.skillCategories) && t.skillCategories.length){
+      const already = t.skillCategories.some(c => (c.skills||[]).some(x => String(x).toLowerCase() === String(s.text).toLowerCase()));
+      if(!already){
+        let extra = t.skillCategories.find(c => (c.category||"").trim().toLowerCase() === "additional skills");
+        if(!extra){ extra = { category: "Additional Skills", skills: [] }; t.skillCategories.push(extra); }
+        extra.skills = extra.skills || [];
+        extra.skills.push(s.text);
+      }
+    }
   }
   else if(s.action === "add_certification"){ t.certifications = t.certifications || []; t.certifications.push(s.text); }
   else if(s.action === "add_project"){ t.projects = t.projects || []; t.projects.push({ name: s.text, detail: s.detail || "", tech: s.keywords || [] }); }
@@ -730,9 +772,16 @@ function Sheet({ data, tplCls, innerRef, editing, review }){
         {sumSugs.map(s => <InlineSug key={s.id} s={s} onAccept={A} onReject={R} />)}
       </>) : null}
 
-      {((data.coreSkills||[]).length || skillSugs.length) ? (<>
+      {((data.skillCategories||[]).length || (data.coreSkills||[]).length || skillSugs.length) ? (<>
         <div className="r-h2">Core Skills</div>
-        {(data.coreSkills||[]).length ? <p className="r-skills">{data.coreSkills.join(",  ")}</p> : null}
+        {(data.skillCategories||[]).length
+          ? (data.skillCategories||[]).map((cat, i) => {
+              const items = (cat.skills||[]).filter(Boolean);
+              const label = (cat.category||"").trim();
+              if(!items.length && !label) return null;
+              return <p className="r-skills" key={i}>{label ? <span className="r-cat">{label}: </span> : null}{items.join(", ")}</p>;
+            })
+          : ((data.coreSkills||[]).length ? <p className="r-skills">{data.coreSkills.join(",  ")}</p> : null)}
         {skillSugs.map(s => <InlineSug key={s.id} s={s} onAccept={A} onReject={R} />)}
       </>) : null}
 
@@ -799,7 +848,14 @@ function resumePlainText(d){
   const cb = [c.email, c.phone, c.location, ...((c.links)||[])].filter(Boolean).join("  |  ");
   if(cb) L.push(cb);
   if(d.summary){ L.push("", "PROFESSIONAL SUMMARY", d.summary); }
-  if((d.coreSkills||[]).length){ L.push("", "CORE SKILLS", d.coreSkills.join(", ")); }
+  if((d.skillCategories||[]).length){
+    L.push("", "CORE SKILLS");
+    d.skillCategories.forEach(cat => {
+      const items = (cat.skills||[]).filter(Boolean);
+      const label = (cat.category||"").trim();
+      if(items.length || label) L.push(`${label ? label + ": " : ""}${items.join(", ")}`);
+    });
+  } else if((d.coreSkills||[]).length){ L.push("", "CORE SKILLS", d.coreSkills.join(", ")); }
   if((d.experience||[]).length){
     L.push("", "PROFESSIONAL EXPERIENCE");
     d.experience.forEach(e => {
@@ -841,6 +897,39 @@ function Gauge({ value, label, sub, Icon }){
 }
 
 /* ------------------------------------------------------------------ */
+/*  Editable resume surface                                            */
+/*                                                                     */
+/*  The edit mode is an *uncontrolled* contentEditable: we inject the  */
+/*  HTML imperatively a single time, on mount, and never feed React    */
+/*  state back into the DOM afterwards. That is what keeps the caret   */
+/*  from jumping to the top — any re-render of the app (e.g. the        */
+/*  background profile poll) leaves the typed content untouched         */
+/*  because React is not managing this node's children.                */
+/* ------------------------------------------------------------------ */
+const EditableSheet = React.forwardRef(function EditableSheet({ html, tplCls, editing }, fwdRef){
+  const elRef = useRef(null);
+  const setRefs = useCallback((node) => {
+    elRef.current = node;
+    if (typeof fwdRef === "function") fwdRef(node);
+    else if (fwdRef) fwdRef.current = node;
+  }, [fwdRef]);
+  // mount-only: deliberately no `html` dependency so re-renders never reset the DOM.
+  // useLayoutEffect injects before paint so there is no flash of empty content.
+  React.useLayoutEffect(() => {
+    if (elRef.current) elRef.current.innerHTML = html || "";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <div
+      className={"sheet " + tplCls}
+      ref={setRefs}
+      contentEditable={editing}
+      suppressContentEditableWarning={true}
+    />
+  );
+});
+
+/* ------------------------------------------------------------------ */
 /*  Main component                                                     */
 /* ------------------------------------------------------------------ */
 function ResumeApp(){
@@ -866,6 +955,9 @@ function ResumeApp(){
   const [cover, setCover] = useState("");
   const [coverBusy, setCoverBusy] = useState(false);
   const [copiedCover, setCopiedCover] = useState(false);
+  const [outreach, setOutreach] = useState(null); // { subject, body } cold/outreach email
+  const [outreachBusy, setOutreachBusy] = useState(false);
+  const [copiedOutreach, setCopiedOutreach] = useState(false);
   const [histQuery, setHistQuery] = useState("");
   const [prep, setPrep] = useState(null);
   const [prepBusy, setPrepBusy] = useState(false);
@@ -966,7 +1058,7 @@ function ResumeApp(){
 
   const optimize = async () => {
     if(!master.trim() || !jd.trim()) return;
-    setBusy(true); setError(""); setResult(null); setCover(""); setPrep(null); setPages(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
+    setBusy(true); setError(""); setResult(null); setCover(""); setOutreach(null); setPrep(null); setPages(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
     try {
       setStage("Reading the job description");
       const analysis = parseJSON(await withRetry(() => callClaude(SYS_JD, jd)));
@@ -1063,6 +1155,56 @@ function ResumeApp(){
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   };
 
+  // ---- Cold / outreach email (a short email to a recruiter, separate from the cover letter) ----
+  const outreachText = (o) => o ? `Subject: ${o.subject || ""}\n\n${o.body || ""}`.trim() : "";
+  const genOutreach = async () => {
+    if(!result) return;
+    setOutreachBusy(true); setError("");
+    try {
+      const current = applyAll(result.tailored, acceptedSugs);
+      const o = parseJSON(await withRetry(() => callClaude(
+        SYS_OUTREACH, `JD ANALYSIS:\n${JSON.stringify(result.analysis)}\n\nTAILORED RESUME:\n${JSON.stringify(current)}`
+      )));
+      if(!o || !(o.subject || o.body)) throw new Error("Could not generate the outreach email. Try again.");
+      setOutreach({ subject: (o.subject || "").trim(), body: (o.body || "").trim() });
+    } catch (e) { setError(e.message || "Couldn't generate the outreach email."); }
+    finally { setOutreachBusy(false); }
+  };
+  const copyOutreach = async (what) => {
+    const text = what === "subject" ? (outreach?.subject || "") : what === "body" ? (outreach?.body || "") : outreachText(outreach);
+    try { await navigator.clipboard.writeText(text); setCopiedOutreach(true); setTimeout(() => setCopiedOutreach(false), 1500); }
+    catch { setError("Couldn't copy automatically — select the text and copy manually."); }
+  };
+  const downloadOutreach = () => {
+    const name = (result?.tailored?.name || "outreach").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    const role = (jobTitle || result?.analysis?.jobTitle || "role").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    const blob = new Blob([outreachText(outreach)], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `${name}-${role}-outreach-email.txt`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  };
+
+  // ---- Add a skill to the resume straight from the Analysis tab ----
+  const skillInResume = (skill) => {
+    const s = String(skill).toLowerCase().trim();
+    if(!s || !t) return false;
+    if((t.coreSkills || []).some(x => String(x).toLowerCase().trim() === s)) return true;
+    return (t.skillCategories || []).some(c => (c.skills || []).some(x => String(x).toLowerCase().trim() === s));
+  };
+  const addSkillFromAnalysis = (skill) => {
+    const text = String(skill).trim();
+    if(!text) return;
+    const id = "asx-skill-" + text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    setAcceptedSugs(prev => (
+      prev.some(x => x.id === id || (x.action === "add_skill" && String(x.text).toLowerCase().trim() === text.toLowerCase().trim()))
+        ? prev
+        : [...prev, { id, section: "skills", action: "add_skill", text, keywords: [text], reason: "Added from analysis", needsVerification: true }]
+    ));
+    setEditedHTML(null); setEditing(false); // re-render from data so the new skill appears
+  };
+
   const genPrep = async () => {
     if(!result) return;
     setPrepBusy(true); setError("");
@@ -1157,7 +1299,7 @@ function ResumeApp(){
     setCompany(v.company || "");
     setTpl(v.tpl || tpl);
     setCurrentVid(v.id);
-    setTab("resume"); setView("recruiter"); setPages(null); setCover(""); setPrep(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
+    setTab("resume"); setView("recruiter"); setPages(null); setCover(""); setOutreach(null); setPrep(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
   };
   const toggleCmp = (id) => setCmp(prev => prev.includes(id) ? prev.filter(x => x !== id) : (prev.length < 2 ? [...prev, id] : [prev[1], id]));
 
@@ -1180,6 +1322,7 @@ function ResumeApp(){
     { id: "analysis", label: "Analysis", Icon: Target },
     { id: "improve", label: "Improve", Icon: Sparkles },
     { id: "cover", label: "Cover letter", Icon: Mail },
+    { id: "outreach", label: "Outreach email", Icon: Send },
     { id: "prep", label: "Interview prep", Icon: MessageSquare },
     { id: "history", label: "History", Icon: History },
   ];
@@ -1371,7 +1514,7 @@ function ResumeApp(){
                       <div className="print-area">
                         <div className="sheet-scroll">
                           {editedHTML !== null ? (
-                            <div className={"sheet " + tplCls} ref={sheetRef} contentEditable={editing} suppressContentEditableWarning={true} dangerouslySetInnerHTML={{ __html: editedHTML }} />
+                            <EditableSheet html={editedHTML} tplCls={tplCls} editing={editing} ref={sheetRef} />
                           ) : (
                             <Sheet data={t} tplCls={tplCls} innerRef={sheetRef} editing={editing} review={review} />
                           )}
@@ -1400,7 +1543,7 @@ function ResumeApp(){
                       <h4><ScanLine size={15} /> Keyword coverage <span className="cnt">{cov.covered.length}/{cov.total}</span></h4>
                       {cov.covered.length > 0 && <><div className="rb-lbl">Present in your resume</div><div className="chips" style={{ marginBottom: 12 }}>{cov.covered.map((k,i) => <span className="chip ok" key={i}><Check size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />{k}</span>)}</div></>}
                       {cov.missing.length > 0
-                        ? <><div className="rb-lbl">Missing — add only if you truly have them</div><div className="chips">{cov.missing.map((k,i) => <span className="chip miss" key={i}>{k}</span>)}</div></>
+                        ? <><div className="rb-lbl">Missing — click <b>+</b> to add to your skills (only if you truly have it)</div><div className="chips">{cov.missing.map((k,i) => <button className="chip miss chip-add" key={i} onClick={() => addSkillFromAnalysis(k)} title={"Add “" + k + "” to your resume skills"}><Plus size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />{k}</button>)}</div></>
                         : <div className="rb-saved" style={{ marginTop: 0 }}><Check size={14} /> Every tracked keyword is covered.</div>}
                     </div>
 
@@ -1441,16 +1584,27 @@ function ResumeApp(){
 
                     {Array.isArray(asx.missingSkills) && asx.missingSkills.length > 0 && (
                       <div className="rb-sec">
-                        <h4><AlertTriangle size={15} /> Skills to consider adding</h4>
-                        <div className="chips">{asx.missingSkills.map((k,i) => <span className="chip miss" key={i}>{k}</span>)}</div>
-                        <p className="rb-hint">Add these only where you have real experience — the tool will never invent them for you.</p>
+                        <h4><AlertTriangle size={15} /> Skills to consider adding
+                          {asx.missingSkills.some(k => !skillInResume(k)) && (
+                            <button className="rb-btn rb-btn-ghost rb-btn-sm" style={{ marginLeft: "auto" }} onClick={() => asx.missingSkills.forEach(k => { if(!skillInResume(k)) addSkillFromAnalysis(k); })}><Plus size={13} /> Add all I have</button>
+                          )}
+                        </h4>
+                        <div className="chips">{asx.missingSkills.map((k,i) => (
+                          skillInResume(k)
+                            ? <span className="chip ok" key={i}><Check size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />{k}</span>
+                            : <button className="chip miss chip-add" key={i} onClick={() => addSkillFromAnalysis(k)} title={"Add “" + k + "” to your resume skills"}><Plus size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />{k}</button>
+                        ))}</div>
+                        <p className="rb-hint">Click a skill to drop it into your resume’s skills section — add only the ones you genuinely have. Adding updates your scores live; nothing existing is removed.</p>
                       </div>
                     )}
 
                     {Array.isArray(asx.sectionSuggestions) && asx.sectionSuggestions.length > 0 && (
                       <div className="rb-sec">
-                        <h4><Layers size={15} /> Section-by-section suggestions</h4>
+                        <h4><Layers size={15} /> Section-by-section suggestions
+                          <button className="rb-btn rb-btn-acc rb-btn-sm" style={{ marginLeft: "auto" }} onClick={async () => { await genSuggestions(); setTab("resume"); }} disabled={sugBusy}>{sugBusy ? <><Loader2 size={13} className="spin" /> Preparing…</> : <><Sparkles size={13} /> Turn into one-click edits</>}</button>
+                        </h4>
                         <ul className="rb-list">{asx.sectionSuggestions.map((s,i) => <li key={i}><span className="badge yes" style={{ background: "var(--card-2)", color: "var(--ink-soft)" }}>{s.section}</span><span>{s.suggestion}</span></li>)}</ul>
+                        <p className="rb-hint">Use “Turn into one-click edits” to get ready-to-apply summary, skills and experience bullets you can Accept or Reject on the Resume tab.</p>
                       </div>
                     )}
 
@@ -1564,6 +1718,39 @@ function ResumeApp(){
                   </div>
                 )}
 
+                {/* COLD / OUTREACH EMAIL TAB */}
+                {tab === "outreach" && (
+                  <div className="rb-panel">
+                    <div className="rb-toolbar">
+                      <div className="rb-lbl" style={{ margin: 0 }}>A short cold email to send a recruiter, HR, or the hiring team — built from your resume and this role.</div>
+                      <div className="rb-dlrow">
+                        {outreach && (
+                          <>
+                            <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => copyOutreach("all")}>{copiedOutreach ? <><Check size={13} /> Copied</> : <><FileText size={13} /> Copy all</>}</button>
+                            <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadOutreach}><FileDown size={13} /> Download</button>
+                          </>
+                        )}
+                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genOutreach} disabled={outreachBusy}>
+                          {outreachBusy ? <><Loader2 size={13} className="spin" /> Writing…</> : <><Send size={13} /> {outreach ? "Regenerate" : "Generate outreach email"}</>}
+                        </button>
+                      </div>
+                    </div>
+                    {outreach ? (
+                      <>
+                        <div className="rb-sec" style={{ marginBottom: 12 }}>
+                          <h4 style={{ marginBottom: 8 }}><Mail size={15} /> Subject line <button className="rb-btn rb-btn-ghost rb-btn-sm" style={{ marginLeft: "auto" }} onClick={() => copyOutreach("subject")}><FileText size={13} /> Copy</button></h4>
+                          <div className="proseout" style={{ fontWeight: 600 }}>{outreach.subject}</div>
+                        </div>
+                        <div className="rb-sec">
+                          <h4 style={{ marginBottom: 8 }}><Send size={15} /> Email body <button className="rb-btn rb-btn-ghost rb-btn-sm" style={{ marginLeft: "auto" }} onClick={() => copyOutreach("body")}><FileText size={13} /> Copy</button></h4>
+                          <div className="proseout">{outreach.body}</div>
+                        </div>
+                        <p className="rb-hint">Swap the greeting for the person's real name where you can — a named email gets far more replies. Attach or link your downloaded resume PDF.</p>
+                      </>
+                    ) : !outreachBusy && <div className="rb-empty"><div className="big"><Send size={24} /></div><h3>No outreach email yet</h3><p>Generate a brief, confident cold email (~150 words) you can send a recruiter or hiring manager — with a ready subject line.</p></div>}
+                  </div>
+                )}
+
                 {/* INTERVIEW PREP TAB */}
                 {tab === "prep" && (
                   <div className="rb-panel">
@@ -1646,6 +1833,9 @@ function ResumeApp(){
     </div>
   );
 }
+// Memoized so the parent auth/profile poll (which refreshes every 20s) can't
+// trigger a re-render of the whole resume app mid-edit. ResumeApp takes no props.
+const ResumeAppMemo = React.memo(ResumeApp);
 
 /* ============================================================ */
 /*  Authentication + admin approval layer (wraps the resume app) */
@@ -1806,7 +1996,7 @@ export default function App(){
 
   const signOut = async () => { await supabase.auth.signOut(); setProfile(null); setAdminOpen(false); };
 
-  if(!supabase) return <ResumeApp />;                 // not configured yet → run open
+  if(!supabase) return <ResumeAppMemo />;                 // not configured yet → run open
   if(session === undefined) return <Centered><Loader2 size={28} className="spin" style={{ color: "var(--green)" }} /></Centered>;
   if(!session) return <AuthScreen />;
   if(profile === null) return <Centered><Loader2 size={28} className="spin" style={{ color: "var(--green)" }} /></Centered>;
@@ -1822,7 +2012,7 @@ export default function App(){
       </div>
       {adminOpen && profile.is_admin
         ? <div style={{ maxWidth: 1180, margin: "0 auto", padding: "0 20px" }}><AdminPanel onClose={() => setAdminOpen(false)} meId={session.user.id} /></div>
-        : <ResumeApp />}
+        : <ResumeAppMemo />}
     </div>
   );
 }
