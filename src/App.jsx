@@ -2267,7 +2267,10 @@ function AuthScreen(){
     setBusy(true); setMsg("");
     try {
       const { error } = await supabase.auth.signInWithOtp({
-        email: address, options: { shouldCreateUser: mode === "register" }
+        email: address, options: {
+          shouldCreateUser: mode === "register",
+          emailRedirectTo: window.location.origin + "/",
+        }
       });
       if (error) throw error;
       setEmail(address); setSent(true); setCode(""); setCooldown(60);
