@@ -3,7 +3,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { MongoClient, ServerApiVersion } from "mongodb";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, ".env") });
@@ -12,18 +11,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-
-const mongoUri = process.env.MONGODB_URI;
-const mongoDbName = process.env.MONGODB_DB_NAME || "resume_tailor";
-let mongoClient = null;
-async function getMongoDb(){
-  if(!mongoUri) throw new Error("MONGODB_URI is not configured in .env");
-  if(!mongoClient){
-    mongoClient = new MongoClient(mongoUri, { serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true } });
-    await mongoClient.connect();
-  }
-  return mongoClient.db(mongoDbName);
-}
 
 const PROVIDERS = [
   { name: "openai", endpoint: "https://api.openai.com/v1/chat/completions",                              key: process.env.OPENAI_API_KEY, model: "gpt-4o-mini" },
@@ -108,30 +95,5 @@ app.post("/api/claude", async (req, res) => {
   }
 });
 
-
-app.post("/api/resumes", async (req, res) => {
-  try {
-    const body = req.body || {};
-    if(!body.tailored || typeof body.tailored !== "object") return res.status(400).json({ error: "tailored resume data is required" });
-    const text = (v, max = 300) => String(v ?? "").trim().slice(0, max);
-    const db = await getMongoDb();
-    const result = await db.collection("tailored_resumes").insertOne({
-      companyName: text(body.companyName, 200) || "Unknown company",
-      jobTitle: text(body.jobTitle, 200),
-      candidateName: text(body.tailored?.name, 200),
-      template: text(body.template, 80),
-      matchScore: Number.isFinite(Number(body.matchScore)) ? Number(body.matchScore) : null,
-      coverageScore: Number.isFinite(Number(body.coverageScore)) ? Number(body.coverageScore) : null,
-      analysisKeywords: Array.isArray(body.analysisKeywords) ? body.analysisKeywords.map(v => text(v, 120)).filter(Boolean).slice(0, 100) : [],
-      tailored: body.tailored,
-      createdAt: new Date(),
-      source: "resume-tailor-local",
-    });
-    res.status(201).json({ ok: true, id: result.insertedId.toString() });
-  } catch (e) {
-    console.log("MongoDB save failed:", e);
-    res.status(500).json({ error: "Could not save tailored resume to MongoDB.", details: String(e?.message || e) });
-  }
-});
 
 app.listen(3001, () => console.log("AI backend running on http://localhost:3001"));

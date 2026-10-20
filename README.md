@@ -36,18 +36,3 @@ For local API calls, run the API server separately if you use `server.js`; Vite 
 6. Redeploy after adding environment variables. Vercel will serve the Vite frontend and `/api/claude.js` as a serverless function.
 
 The Vercel Hobby plan is suitable for personal/non-commercial testing, subject to Vercel's current Hobby limits and terms.
-
-## MongoDB Atlas storage (free tier)
-
-Each successful tailoring is also saved server-side to MongoDB Atlas in the `tailored_resumes` collection. The saved document includes the target company name, job title, candidate name, selected template, match/coverage scores, analysis keywords, the complete tailored resume JSON, and a timestamp.
-
-Required server-side environment variables:
-
-```text
-MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-host>/?retryWrites=true&w=majority
-MONGODB_DB_NAME=resume_tailor
-```
-
-`MONGODB_DB_NAME` is optional; it defaults to `resume_tailor`.
-
-Never expose `MONGODB_URI` through a `VITE_...` variable or commit it to Git. In Vercel add it under the project's Environment Variables and redeploy.

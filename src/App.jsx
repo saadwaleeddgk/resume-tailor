@@ -456,20 +456,6 @@ const store = {
 /* ------------------------------------------------------------------ */
 /*  Claude API helpers (Claude-in-Claude)                              */
 /* ------------------------------------------------------------------ */
-async function saveTailoredResumeToMongo(payload){
-  const res = await fetch("/api/resumes", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  let data = null;
-  try { data = await res.json(); } catch {}
-  if(!res.ok){
-    throw new Error(data?.details || data?.error || `MongoDB save failed (${res.status})`);
-  }
-  return data;
-}
-
 async function callClaude(system, userText, maxTokens = 2500){
   let lastErr;
   for(let attempt = 0; attempt < 3; attempt++){
@@ -1474,21 +1460,7 @@ function ResumeApp(){
         analysisKeywords: analysis.keywords || [],
       });
 
-      try {
-        setStage("Saving tailored resume");
-        await saveTailoredResumeToMongo({
-          companyName: company || analysis.company || "Unknown company",
-          jobTitle: jobTitle || analysis.jobTitle || "Untitled role",
-          template: tpl,
-          matchScore: scores.match,
-          coverageScore: coverage.coverage,
-          analysisKeywords: analysis.keywords || [],
-          tailored,
-        });
-      } catch (dbErr) {
-        console.warn("Tailored resume was generated but MongoDB save failed:", dbErr);
-        setError(`Resume tailored successfully, but database save failed: ${dbErr.message || dbErr}`);
-      }
+
     } catch (e) {
       setError(e.message || "Something went wrong. Please try again.");
     } finally {
