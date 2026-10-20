@@ -439,7 +439,7 @@ const TEMPLATES = [
 const hasStore = typeof window !== "undefined" && window.storage && typeof window.storage.get === "function";
 const hasLS = (() => { try { localStorage.setItem("__rt__", "1"); localStorage.removeItem("__rt__"); return true; } catch { return false; } })();
 const mem = {};
-const store = {
+const baseStore = {
   available: hasStore || hasLS,
   async get(k){
     if(hasStore){ try { return await window.storage.get(k); } catch { return null; } }
@@ -457,13 +457,16 @@ const store = {
 /*  Claude API helpers (Claude-in-Claude)                              */
 /* ------------------------------------------------------------------ */
 async function callClaude(system, userText, maxTokens = 2500){
+  if (!supabase) throw new Error("Authentication is not configured.");
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error("Please sign in to continue.");
   let lastErr;
   for(let attempt = 0; attempt < 3; attempt++){
     let res;
     try {
       res = await fetch("/api/claude", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
           max_tokens: maxTokens,
@@ -1289,7 +1292,12 @@ const EditableSheet = React.forwardRef(function EditableSheet({ html, tplCls, ed
 /* ------------------------------------------------------------------ */
 /*  Main component                                                     */
 /* ------------------------------------------------------------------ */
-function ResumeApp(){
+function ResumeApp({ userId }){
+  const store = React.useMemo(() => ({
+    available: baseStore.available,
+    get: key => baseStore.get(userId + ":" + key),
+    set: (key, value) => baseStore.set(userId + ":" + key, value),
+  }), [userId]);
   const [master, setMaster] = useState("");
   const [masterSaved, setMasterSaved] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
@@ -2224,8 +2232,7 @@ function ResumeApp(){
     </div>
   );
 }
-// Memoized so the parent auth/profile poll (which refreshes every 20s) can't
-// trigger a re-render of the whole resume app mid-edit. ResumeApp takes no props.
+// Keep authentication updates from interrupting resume editing.
 const ResumeAppMemo = React.memo(ResumeApp);
 
 /* ============================================================ */
@@ -2241,169 +2248,75 @@ function Centered({ children }){
 }
 
 function AuthScreen(){
-  const [mode, setMode] = useState("login");
+  const [mode, setMode] = useState("register");
   const [email, setEmail] = useState("");
-  const [pw, setPw] = useState("");
+  const [code, setCode] = useState("");
+  const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const submit = async () => {
-    if(!email.trim() || !pw){ setMsg("Enter your email and a password."); return; }
+  const [cooldown, setCooldown] = useState(0);
+  useEffect(() => {
+    if (!cooldown) return;
+    const timer = setTimeout(() => setCooldown(n => n - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
+  const sendCode = async () => {
+    if (busy || cooldown) return;
+    const address = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) { setMsg("Enter a valid email address."); return; }
     setBusy(true); setMsg("");
     try {
-      if(mode === "register"){
-        const { error } = await supabase.auth.signUp({ email: email.trim(), password: pw });
-        if(error) throw error;
-        setMsg("Account created. An admin needs to approve you before you can use the app.");
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
-        if(error) throw error;
-      }
-    } catch(e){ setMsg(e.message || "Something went wrong."); }
+      const { error } = await supabase.auth.signInWithOtp({
+        email: address, options: { shouldCreateUser: mode === "register" }
+      });
+      if (error) throw error;
+      setEmail(address); setSent(true); setCode(""); setCooldown(60);
+      setMsg("Check your inbox and spam folder for your verification code.");
+    } catch (e) { setMsg(e.message || "Could not send a code. Please try again."); }
     finally { setBusy(false); }
   };
-  return (
-    <Centered>
-      <div className="rb-card">
-        <div className="rb-ch"><div className="ico"><Sparkles size={16} /></div><div><div className="eyebrow">Resume Tailor</div><h2 style={{ marginTop: 1 }}>{mode === "login" ? "Sign in" : "Create an account"}</h2></div></div>
-        <div className="rb-cb">
-          <div className="rb-lbl">Email</div>
-          <input className="rb-in" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" />
-          <div className="rb-lbl" style={{ marginTop: 10 }}>Password</div>
-          <input className="rb-in" type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="At least 6 characters" onKeyDown={e => e.key === "Enter" && submit()} />
-          <button className="rb-btn rb-btn-pri rb-btn-block" style={{ marginTop: 14 }} onClick={submit} disabled={busy}>
-            {busy ? <><Loader2 size={15} className="spin" /> Please wait…</> : (mode === "login" ? "Sign in" : "Register")}
-          </button>
-          {msg && <div className="rb-banner" style={{ marginTop: 12, marginBottom: 0 }}><AlertTriangle size={14} style={{ flex: "none", marginTop: 1 }} />{msg}</div>}
-          <p className="rb-hint" style={{ textAlign: "center", marginTop: 12 }}>
-            {mode === "login" ? "New here? " : "Already have an account? "}
-            <button onClick={() => { setMode(mode === "login" ? "register" : "login"); setMsg(""); }} style={{ background: "none", border: "none", color: "var(--green-ink)", cursor: "pointer", fontWeight: 600, fontFamily: "inherit", fontSize: "inherit" }}>{mode === "login" ? "Register" : "Sign in"}</button>
-          </p>
-        </div>
-      </div>
-    </Centered>
-  );
-}
-
-function StatusScreen({ profile, onSignOut }){
-  const rejected = profile.status === "rejected";
-  return (
-    <Centered>
-      <div className="rb-card">
-        <div className="rb-cb" style={{ textAlign: "center", padding: "32px 26px" }}>
-          <div style={{ width: 54, height: 54, borderRadius: 15, background: rejected ? "var(--red-tint)" : "var(--amber-tint)", display: "grid", placeItems: "center", margin: "0 auto 14px", color: rejected ? "var(--red)" : "var(--amber)" }}>
-            {rejected ? <X size={26} /> : <Loader2 size={26} />}
-          </div>
-          <h3 style={{ margin: "0 0 6px", fontSize: 17, color: "var(--ink)", fontWeight: 650 }}>{rejected ? "Access not granted" : "Awaiting approval"}</h3>
-          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13.5, lineHeight: 1.55 }}>
-            {rejected ? "An admin hasn't granted you access to this app. If you think this is a mistake, contact the administrator." : "Your account is registered and waiting for an admin to approve it. This page updates automatically once you're approved."}
-          </p>
-          <button className="rb-btn rb-btn-ghost rb-btn-sm" style={{ marginTop: 18 }} onClick={onSignOut}>Sign out</button>
-        </div>
-      </div>
-    </Centered>
-  );
-}
-
-function AdminPanel({ onClose, meId }){
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
-  const load = async () => {
-    setLoading(true); setErr("");
-    const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
-    if(error) setErr(error.message); else setUsers(data || []);
-    setLoading(false);
+  const verify = async () => {
+    if (busy) return;
+    if (!/^\d{6,10}$/.test(code.trim())) { setMsg("Enter the numeric code from your email."); return; }
+    setBusy(true); setMsg("");
+    try {
+      const { data, error } = await supabase.auth.verifyOtp({ email, token: code.trim(), type: "email" });
+      if (error) throw error;
+      if (!data.session) throw new Error("Verification did not create a session. Please request a new code.");
+    } catch (e) { setMsg(e.message || "Invalid or expired code. Please try again."); }
+    finally { setBusy(false); }
   };
-  useEffect(() => { load(); }, []);
-  const update = async (id, patch) => {
-    const { error } = await supabase.from("profiles").update(patch).eq("id", id);
-    if(error) setErr(error.message); else load();
-  };
-  const setLimit = (u) => {
-    const cur = u.daily_token_limit == null ? "" : String(u.daily_token_limit);
-    const v = window.prompt("Daily token limit for " + u.email + " (a number). Leave blank for UNLIMITED:", cur);
-    if(v === null) return;
-    update(u.id, { daily_token_limit: v.trim() === "" ? null : Math.max(0, parseInt(v, 10) || 0) });
-  };
-  const pending = users.filter(u => u.status === "pending");
-  return (
-    <div className="rb-card" style={{ marginTop: 14 }}>
-      <div className="rb-ch">
-        <div className="ico"><ShieldCheck size={16} /></div>
-        <div><div className="eyebrow">Admin{pending.length ? " · " + pending.length + " pending" : ""}</div><h2 style={{ marginTop: 1 }}>User management</h2></div>
-        <button className="rb-btn rb-btn-ghost rb-btn-sm" style={{ marginLeft: "auto" }} onClick={load}><RefreshCw size={13} /> Refresh</button>
-        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={onClose}>Close</button>
-      </div>
-      <div className="rb-cb">
-        {err && <div className="rb-err"><AlertTriangle size={14} style={{ flex: "none", marginTop: 1 }} />{err}</div>}
-        {loading ? <div className="rb-hint">Loading users…</div> : (
-          users.length === 0 ? <div className="rb-hint">No users yet.</div> :
-          users.map(u => (
-            <div className="histrow" key={u.id}>
-              <div className="info">
-                <div className="t">{u.email || u.id.slice(0, 8)}{u.is_admin ? " · admin" : ""}{u.id === meId ? " (you)" : ""}</div>
-                <div className="s">
-                  status: <b style={{ color: u.status === "approved" ? "var(--green-ink)" : u.status === "rejected" ? "var(--red)" : "var(--amber)" }}>{u.status}</b>
-                  {"  ·  limit: "}<b>{u.daily_token_limit == null ? "unlimited" : u.daily_token_limit.toLocaleString() + " / day"}</b>
-                  {"  ·  used today: " + (u.tokens_used || 0).toLocaleString()}
-                </div>
-              </div>
-              <div className="histacts" style={{ flexWrap: "wrap" }}>
-                {u.status !== "approved" && <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={() => update(u.id, { status: "approved" })}><Check size={13} /> Approve</button>}
-                {u.status !== "rejected" && u.id !== meId && <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => update(u.id, { status: "rejected" })}><X size={13} /> Reject</button>}
-                <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => setLimit(u)}>Set limit</button>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
+  return <Centered><div className="rb-card">
+    <div className="rb-ch"><div className="ico"><Mail size={16} /></div><div><div className="eyebrow">Resume Tailor</div><h2>{sent ? "Verify your email" : mode === "register" ? "Create an account" : "Sign in"}</h2></div></div>
+    <div className="rb-cb">
+      <p className="rb-hint">{sent ? "Enter the one-time code sent to " + email : "Use your email address, including Gmail. We will email you a verification code. No password needed."}</p>
+      <form onSubmit={e => { e.preventDefault(); if (sent) verify(); else sendCode(); }}>
+        {sent ? <><label className="rb-lbl" htmlFor="auth-code">Verification code</label><input id="auth-code" className="rb-in" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} inputMode="numeric" autoComplete="one-time-code" maxLength={10} required autoFocus /></> : <><label className="rb-lbl" htmlFor="auth-email">Email</label><input id="auth-email" className="rb-in" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@gmail.com" required disabled={busy} /></>}
+        <button className="rb-btn rb-btn-pri rb-btn-block" style={{ marginTop: 14 }} disabled={busy || (!sent && cooldown > 0)}>{busy ? "Please wait?" : sent ? "Verify and enter" : "Send verification code"}</button>
+      </form>
+      {msg && <p className="rb-hint" role="status" aria-live="polite">{msg}</p>}
+      {sent && <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={sendCode} disabled={busy || cooldown > 0}>{cooldown ? "Resend in " + cooldown + "s" : "Resend code"}</button><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={() => { setSent(false); setCode(""); setMsg(""); }}>Change email</button></div>}
+      {!sent && <p className="rb-hint"><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={() => { setMode(mode === "login" ? "register" : "login"); setMsg(""); }}>{mode === "login" ? "New here? Sign up" : "Already registered? Sign in"}</button></p>}
     </div>
-  );
+  </div></Centered>;
 }
 
 export default function App(){
-  const [session, setSession] = useState(undefined); // undefined = still loading
-  const [profile, setProfile] = useState(null);
-  const [adminOpen, setAdminOpen] = useState(false);
-
+  const [session, setSession] = useState(undefined);
+  const [authError, setAuthError] = useState("");
   useEffect(() => {
-    if(!supabase) return;
-    supabase.auth.getSession().then(({ data }) => setSession(data.session || null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s || null));
-    return () => sub.subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if(!supabase || !session){ setProfile(null); return; }
+    if (!supabase) return;
     let active = true;
-    const fetchProfile = async () => {
-      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
-      if(active) setProfile(data || null);
-    };
-    fetchProfile();
-    const iv = setInterval(fetchProfile, 20000); // pick up approval changes while waiting
-    return () => { active = false; clearInterval(iv); };
-  }, [session]);
-
-  const signOut = async () => { await supabase.auth.signOut(); setProfile(null); setAdminOpen(false); };
-
-  if(!supabase) return <ResumeAppMemo />;                 // not configured yet → run open
-  if(session === undefined) return <Centered><Loader2 size={28} className="spin" style={{ color: "var(--green)" }} /></Centered>;
-  if(!session) return <AuthScreen />;
-  if(profile === null) return <Centered><Loader2 size={28} className="spin" style={{ color: "var(--green)" }} /></Centered>;
-  if(profile.status !== "approved") return <StatusScreen profile={profile} onSignOut={signOut} />;
-
-  return (
-    <div className="rb-root">
-      <style>{CSS}</style>
-      <div style={{ maxWidth: 1180, margin: "0 auto", padding: "10px 20px 0", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>{profile.email}{profile.is_admin ? " · admin" : ""}{profile.daily_token_limit == null ? " · unlimited" : ""}</span>
-        {profile.is_admin && <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => setAdminOpen(o => !o)}><ShieldCheck size={13} /> {adminOpen ? "Hide admin" : "Admin"}</button>}
-        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={signOut}>Sign out</button>
-      </div>
-      {adminOpen && profile.is_admin
-        ? <div style={{ maxWidth: 1180, margin: "0 auto", padding: "0 20px" }}><AdminPanel onClose={() => setAdminOpen(false)} meId={session.user.id} /></div>
-        : <ResumeAppMemo />}
-    </div>
-  );
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) setAuthError(error.message);
+      setSession(data?.session || null);
+    }).catch(() => { if (active) { setAuthError("Could not restore your session. Please sign in again."); setSession(null); } });
+    const { data } = supabase.auth.onAuthStateChange((_event, next) => { if (active) setSession(next); });
+    return () => { active = false; data.subscription.unsubscribe(); };
+  }, []);
+  if (!supabase) return <Centered><div className="rb-card"><div className="rb-cb"><h2>Sign-in setup required</h2><p>Configure the Supabase URL and public key to enable email verification. Access is unavailable until sign-in is configured.</p></div></div></Centered>;
+  if (session === undefined) return <Centered><Loader2 className="spin" aria-label="Loading sign-in" /></Centered>;
+  if (!session?.user?.email_confirmed_at || session.user.is_anonymous) return <><AuthScreen />{authError && <p role="alert">{authError}</p>}</>;
+  return <div className="rb-root"><style>{CSS}</style><div style={{ maxWidth: 1180, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "flex-end", gap: 12 }}><span>{session.user.email}</span><button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={async () => { const { error } = await supabase.auth.signOut(); if (error) setAuthError(error.message); else setSession(null); }}>Sign out</button></div>{authError && <p role="alert">{authError}</p>}<ResumeAppMemo key={session.user.id} userId={session.user.id} /></div>;
 }

@@ -1,3 +1,5 @@
+import { requireUser } from "../lib/auth.js";
+
 const PROVIDERS = [
   { name: "openai", endpoint: "https://api.openai.com/v1/chat/completions",                              key: process.env.OPENAI_API_KEY, model: "gpt-4o-mini" },
   { name: "groq",   endpoint: "https://api.groq.com/openai/v1/chat/completions",                          key: process.env.GROQ_API_KEY,   model: "llama-3.3-70b-versatile" },
@@ -47,6 +49,7 @@ async function callLLM(body) {
 }
 export default async function handler(req, res) {
   if (req.method !== "POST") { res.status(405).json({ error: "POST only" }); return; }
+  if (!await requireUser(req, res)) return;
   try {
     const body = req.body || {};
     const messages = [];

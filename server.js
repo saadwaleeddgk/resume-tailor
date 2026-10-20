@@ -1,3 +1,4 @@
+import { requireUser } from "./lib/auth.js";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -78,6 +79,7 @@ async function callLLM(body) {
 }
 
 app.post("/api/claude", async (req, res) => {
+  if (!await requireUser(req, res)) return;
   try {
     const messages = [];
     if (req.body.system) messages.push({ role: "system", content: req.body.system });
