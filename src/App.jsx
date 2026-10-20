@@ -1,8 +1,9 @@
+import AccessShell from "./AccessShell.jsx";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   FileText, Sparkles, Download, Upload, Check, X, AlertTriangle,
   RefreshCw, ChevronRight, Eye, Layers, History, Mail, MessageSquare,
-  Loader2, FileDown, RotateCcw, Target, ShieldCheck, ScanLine, Trash2, Pencil, Send, Plus
+  Loader2, FileDown, RotateCcw, Target, ShieldCheck, ScanLine, Pencil, Send, Plus
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -487,18 +488,33 @@ async function callClaude(system, userText, maxTokens = 2500){
         const j = await res.json();
         if(j && j.error) msg = j.error;
         if(j && Array.isArray(j.tried) && j.tried.length) msg += ` (tried: ${j.tried.join(", ")})`;
-      } catch {}
+      } catch { /* Ignore malformed optional data. */ }
       lastErr = new Error(msg);
       await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
       continue;
     }
-    if(!res.ok) throw new Error("Request failed (" + res.status + ")");
+    if(!res.ok) { const failure = await res.json().catch(() => ({})); throw new Error(failure.error || "Request failed (" + res.status + ")"); }
     const data = await res.json();
     const text = (data.content || []).map(b => (b && b.type === "text" ? b.text : "")).join("");
     if(!text) throw new Error("Empty response");
     return text;
   }
   throw lastErr || new Error("The model providers are busy — please try again in a moment.");
+}
+let pendingTailor = null;
+async function tailorResume(master, jd) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error("Your trial session expired. Reload to continue.");
+  const signature = session.user.id + "\n" + master + "\n" + jd;
+  if (!pendingTailor || pendingTailor.signature !== signature) pendingTailor = { signature, id: crypto.randomUUID() };
+  const response = await fetch("/api/claude", {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + session.access_token },
+    body: JSON.stringify({ action: "tailor", master, jd, requestId: pendingTailor.id }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Could not tailor the resume.");
+  pendingTailor = null;
+  return result;
 }
 function parseJSON(s){
   if(!s) return null;
@@ -840,12 +856,7 @@ async function buildResumePDF(sheetEl){
 /* ------------------------------------------------------------------ */
 /*  Prompts                                                            */
 /* ------------------------------------------------------------------ */
-const SYS_JD = `You are an expert U.S. technical recruiter and ATS analyst. Read the job description and extract its structured requirements.
-Return ONLY minified JSON (no markdown, no commentary) with keys:
-jobTitle (string), company (string or ""), seniority (string), hardSkills (string[]), tools (string[]), softSkills (string[]),
-keywords (string[]: the 16-24 most ATS-relevant terms a parser would scan for, ranked by importance, using the JD's own wording),
-qualifications (string[]: concrete must-have / nice-to-have requirements), responsibilities (string[]: top 6).
-Keep arrays concise and deduplicated.`;
+
 
 const SYS_TAILOR = `You are an elite U.S. resume writer who produces ATS-optimized, recruiter-friendly resumes.
 Rewrite the candidate's MASTER RESUME to target the role described in the JD ANALYSIS.
@@ -1292,7 +1303,9 @@ const EditableSheet = React.forwardRef(function EditableSheet({ html, tplCls, ed
 /* ------------------------------------------------------------------ */
 /*  Main component                                                     */
 /* ------------------------------------------------------------------ */
-function ResumeApp({ userId }){
+function ResumeApp({ userId, account, onUsageChange }){
+  const fullAccess = account.is_admin || account.status === "approved";
+  const canTailor = fullAccess || (account.status === "trial" && account.remaining > 0);
   const store = React.useMemo(() => ({
     available: baseStore.available,
     get: key => baseStore.get(userId + ":" + key),
@@ -1347,9 +1360,9 @@ function ResumeApp({ userId }){
       const m = await store.get("master_resume");
       if(m && m.value){ const v = JSON.parse(m.value); setMaster(v.text||""); setSavedAt(v.at||null); setMasterSaved(!!(v.text||"").trim()); }
       const t = await store.get("selected_template"); if(t && t.value) setTpl(JSON.parse(t.value));
-      const vs = await store.get("resume_versions"); if(vs && vs.value){ try { setVersions(JSON.parse(vs.value)||[]); } catch {} }
+      const vs = await store.get("resume_versions"); if(vs && vs.value){ try { setVersions(JSON.parse(vs.value)||[]); } catch { /* Ignore malformed optional data. */ } }
     })();
-  }, []);
+  }, [store]);
 
   /* estimate page count from rendered sheet height */
   useEffect(() => {
@@ -1365,19 +1378,21 @@ function ResumeApp({ userId }){
     const applied = applyAll(result.tailored, acceptedSugs);
     const cov2 = buildCoverage(result.analysis || {}, applied);
     const sc2 = buildScores(cov2, result.assess || {});
-    setVersions(prev => {
+    // Synchronize derived history after rendering without resetting the active editor.
+    const timer = setTimeout(() => setVersions(prev => {
       if(!prev.some(v => v.id === currentVid)) return prev;
       const next = prev.map(v => v.id === currentVid ? { ...v, tailored: applied, match: sc2.match, coverage: cov2.coverage } : v);
       store.set("resume_versions", JSON.stringify(next));
       return next;
-    });
-  }, [acceptedSugs, currentVid]);
+    }), 0);
+    return () => clearTimeout(timer);
+  }, [acceptedSugs, currentVid, result, store]);
 
   const saveMaster = useCallback(async () => {
     const at = Date.now();
     await store.set("master_resume", JSON.stringify({ text: master, at }));
     setSavedAt(at); setMasterSaved(true);
-  }, [master]);
+  }, [master, store]);
 
   const pickTemplate = async (id) => { setTpl(id); await store.set("selected_template", JSON.stringify(id)); };
 
@@ -1424,30 +1439,11 @@ function ResumeApp({ userId }){
 
   const optimize = async () => {
     if(!master.trim() || !jd.trim()) return;
+    if (!account.is_admin && account.status !== "approved" && (account.status !== "trial" || account.remaining === 0)) { setError("Register and obtain admin approval to continue tailoring."); return; }
     setBusy(true); setError(""); setResult(null); setCover(""); setOutreach(null); setPrep(null); setPages(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
     try {
-      setStage("Reading the job description");
-      const analysis = parseJSON(await withRetry(() => callClaude(SYS_JD, jd)));
-      if(!analysis) throw new Error("Could not analyze the job description. Try again.");
-
-      setStage("Tailoring your resume to the role");
-      // The hiring company's name must never leak into the resume itself, so it
-      // is stripped from the analysis the tailor model sees (rule 2 backstop).
-      const analysisForTailor = { ...analysis, company: "" };
-      const tailored = parseJSON(await withRetry(() => callClaude(
-        SYS_TAILOR,
-        `MASTER RESUME:\n${master}\n\nJD ANALYSIS:\n${JSON.stringify(analysisForTailor)}`,
-        8000
-      )));
-      if(!tailored) throw new Error("Could not generate the tailored resume. Try again.");
-
-      setStage("Scoring fit and checking ATS readiness");
-      const assess = parseJSON(await withRetry(() => callClaude(
-        SYS_ASSESS,
-        `JD ANALYSIS:\n${JSON.stringify(analysis)}\n\nTAILORED RESUME:\n${JSON.stringify(tailored)}`,
-        4000
-      ))) || {};
-
+      setStage("Analyzing the role, tailoring your resume, and checking fit");
+      const { analysis, tailored, assess } = await tailorResume(master, jd);
       const coverage = buildCoverage(analysis, tailored);
       const scores = buildScores(coverage, assess);
       const res = { analysis, tailored, assess, coverage, scores };
@@ -1472,6 +1468,7 @@ function ResumeApp({ userId }){
     } catch (e) {
       setError(e.message || "Something went wrong. Please try again.");
     } finally {
+      onUsageChange();
       setBusy(false); setStage("");
     }
   };
@@ -1800,7 +1797,7 @@ function ResumeApp({ userId }){
                   value={jd} onChange={(e) => setJd(e.target.value)}
                 />
                 <button className="rb-btn rb-btn-pri rb-btn-block" style={{ marginTop: 12 }} onClick={optimize}
-                  disabled={busy || !master.trim() || !jd.trim()}>
+                  disabled={busy || !canTailor || !master.trim() || !jd.trim()}>
                   {busy ? <><Loader2 size={15} className="spin" /> Working…</> : <><Sparkles size={15} /> Optimize resume</>}
                 </button>
                 {!master.trim() && <p className="rb-hint">Add your master resume above to begin.</p>}
@@ -1870,16 +1867,16 @@ function ResumeApp({ userId }){
                       </div>
                       <div className="rb-dlrow">
                         {suggestions.length === 0 ? (
-                          <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genSuggestions} disabled={sugBusy || view !== "recruiter"}>{sugBusy ? <><Loader2 size={13} className="spin" /> Finding…</> : <><Sparkles size={13} /> Suggest improvements</>}</button>
+                          <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genSuggestions} disabled={!fullAccess || sugBusy || view !== "recruiter"}>{sugBusy ? <><Loader2 size={13} className="spin" /> Finding…</> : <><Sparkles size={13} /> Suggest improvements</>}</button>
                         ) : (
                           <>
                             <button className={"rb-btn rb-btn-sm " + (showSug ? "rb-btn-acc" : "rb-btn-ghost")} onClick={toggleSug} disabled={view !== "recruiter"}><Sparkles size={13} /> Suggestions{pendingSug.length ? " (" + pendingSug.length + ")" : ""}</button>
-                            <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={genSuggestions} disabled={sugBusy || view !== "recruiter"} title="Regenerate suggestions">{sugBusy ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}</button>
+                            <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={genSuggestions} disabled={!fullAccess || sugBusy || view !== "recruiter"} title="Regenerate suggestions">{sugBusy ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}</button>
                           </>
                         )}
                         <button className={"rb-btn rb-btn-sm " + (editing ? "rb-btn-acc" : "rb-btn-ghost")} onClick={toggleEdit} disabled={view !== "recruiter"}><Pencil size={13} /> {editing ? "Done editing" : "Edit text"}</button>
-                        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("expand")} disabled={busy || editing}><RefreshCw size={13} /> Fuller</button>
-                        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("condense")} disabled={busy || editing}><RefreshCw size={13} /> Tighter</button>
+                        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("expand")} disabled={!fullAccess || busy || editing}><RefreshCw size={13} /> Fuller</button>
+                        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("condense")} disabled={!fullAccess || busy || editing}><RefreshCw size={13} /> Tighter</button>
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadHTML}><FileDown size={13} /> HTML</button>
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadDOCX} disabled={docxBusy}>{docxBusy ? <><Loader2 size={13} className="spin" /> Building…</> : <><FileText size={13} /> Export DOCX</>}</button>
                         <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={downloadPDF} disabled={pdfBusy}>{pdfBusy ? <><Loader2 size={13} className="spin" /> Building…</> : <><Download size={13} /> Export PDF</>}</button>
@@ -1999,7 +1996,7 @@ function ResumeApp({ userId }){
                     {Array.isArray(asx.sectionSuggestions) && asx.sectionSuggestions.length > 0 && (
                       <div className="rb-sec">
                         <h4><Layers size={15} /> Section-by-section suggestions
-                          <button className="rb-btn rb-btn-acc rb-btn-sm" style={{ marginLeft: "auto" }} onClick={async () => { await genSuggestions(); setTab("resume"); }} disabled={sugBusy}>{sugBusy ? <><Loader2 size={13} className="spin" /> Preparing…</> : <><Sparkles size={13} /> Turn into one-click edits</>}</button>
+                          <button className="rb-btn rb-btn-acc rb-btn-sm" style={{ marginLeft: "auto" }} onClick={async () => { await genSuggestions(); setTab("resume"); }} disabled={!fullAccess || sugBusy}>{sugBusy ? <><Loader2 size={13} className="spin" /> Preparing…</> : <><Sparkles size={13} /> Turn into one-click edits</>}</button>
                         </h4>
                         <ul className="rb-list">{asx.sectionSuggestions.map((s,i) => <li key={i}><span className="badge yes" style={{ background: "var(--card-2)", color: "var(--ink-soft)" }}>{s.section}</span><span>{s.suggestion}</span></li>)}</ul>
                         <p className="rb-hint">Use “Turn into one-click edits” to get ready-to-apply summary, skills and experience bullets you can Accept or Reject on the Resume tab.</p>
@@ -2025,7 +2022,7 @@ function ResumeApp({ userId }){
                           <span className="sug-pill"><Target size={13} /> Match <b>{sc ? sc.match : 0}%</b></span>
                           <span className="sug-pill"><ScanLine size={13} /> Keywords <b>{cov ? cov.coverage : 0}%</b></span>
                         </div>
-                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genSuggestions} disabled={sugBusy}>
+                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genSuggestions} disabled={!fullAccess || sugBusy}>
                           {sugBusy ? <><Loader2 size={13} className="spin" /> Thinking…</> : <><Sparkles size={13} /> {suggestions.length ? "Regenerate" : "Suggest improvements"}</>}
                         </button>
                       </div>
@@ -2106,7 +2103,7 @@ function ResumeApp({ userId }){
                             <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadCover}><FileDown size={13} /> Download</button>
                           </>
                         )}
-                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genCover} disabled={coverBusy}>
+                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genCover} disabled={!fullAccess || coverBusy}>
                           {coverBusy ? <><Loader2 size={13} className="spin" /> Writing…</> : <><Mail size={13} /> {cover ? "Regenerate" : "Generate cover letter"}</>}
                         </button>
                       </div>
@@ -2129,7 +2126,7 @@ function ResumeApp({ userId }){
                             <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadOutreach}><FileDown size={13} /> Download</button>
                           </>
                         )}
-                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genOutreach} disabled={outreachBusy}>
+                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genOutreach} disabled={!fullAccess || outreachBusy}>
                           {outreachBusy ? <><Loader2 size={13} className="spin" /> Writing…</> : <><Send size={13} /> {outreach ? "Regenerate" : "Generate outreach email"}</>}
                         </button>
                       </div>
@@ -2155,7 +2152,7 @@ function ResumeApp({ userId }){
                   <div className="rb-panel">
                     <div className="rb-toolbar">
                       <div className="rb-lbl" style={{ margin: 0 }}>Talking points grounded in your real experience.</div>
-                      <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genPrep} disabled={prepBusy}>
+                      <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={genPrep} disabled={!fullAccess || prepBusy}>
                         {prepBusy ? <><Loader2 size={13} className="spin" /> Preparing…</> : <><MessageSquare size={13} /> {prep ? "Regenerate" : "Generate interview prep"}</>}
                       </button>
                     </div>
@@ -2238,112 +2235,6 @@ const ResumeAppMemo = React.memo(ResumeApp);
 /* ============================================================ */
 /*  Authentication + admin approval layer (wraps the resume app) */
 /* ============================================================ */
-function Centered({ children }){
-  return (
-    <div className="rb-root" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <style>{CSS}</style>
-      <div style={{ width: "100%", maxWidth: 430 }}>{children}</div>
-    </div>
-  );
-}
-
-function AuthScreen(){
-  const [mode, setMode] = useState("register");
-  const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [sent, setSent] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [cooldown, setCooldown] = useState(0);
-  useEffect(() => {
-    if (!cooldown) return;
-    const timer = setTimeout(() => setCooldown(n => n - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [cooldown]);
-  const sendCode = async () => {
-    if (busy || cooldown) return;
-    const address = email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) { setMsg("Enter a valid email address."); return; }
-    setBusy(true); setMsg("");
-    try {
-      const { error } = await supabase.auth.signInWithOtp({
-        email: address, options: {
-          shouldCreateUser: mode === "register",
-          emailRedirectTo: window.location.origin + "/",
-        }
-      });
-      if (error) throw error;
-      setEmail(address); setSent(true); setCode(""); setCooldown(60);
-      setMsg("Check your inbox and spam folder for your verification code.");
-    } catch (e) { setMsg(e.message || "Could not send a code. Please try again."); }
-    finally { setBusy(false); }
-  };
-  const verify = async () => {
-    if (busy) return;
-    if (!/^\d{6,10}$/.test(code.trim())) { setMsg("Enter the numeric code from your email."); return; }
-    setBusy(true); setMsg("");
-    try {
-      const { data, error } = await supabase.auth.verifyOtp({ email, token: code.trim(), type: "email" });
-      if (error) throw error;
-      if (!data.session) throw new Error("Verification did not create a session. Please request a new code.");
-    } catch (e) { setMsg(e.message || "Invalid or expired code. Please try again."); }
-    finally { setBusy(false); }
-  };
-  return <Centered><div className="rb-card">
-    <div className="rb-ch"><div className="ico"><Mail size={16} /></div><div><div className="eyebrow">Resume Tailor</div><h2>{sent ? "Verify your email" : mode === "register" ? "Create an account" : "Sign in"}</h2></div></div>
-    <div className="rb-cb">
-      <p className="rb-hint">{sent ? "Enter the one-time code sent to " + email : "Use your email address, including Gmail. We will email you a verification code. No password needed."}</p>
-      <form onSubmit={e => { e.preventDefault(); if (sent) verify(); else sendCode(); }}>
-        {sent ? <><label className="rb-lbl" htmlFor="auth-code">Verification code</label><input id="auth-code" className="rb-in" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} inputMode="numeric" autoComplete="one-time-code" maxLength={10} required autoFocus /></> : <><label className="rb-lbl" htmlFor="auth-email">Email</label><input id="auth-email" className="rb-in" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@gmail.com" required disabled={busy} /></>}
-        <button className="rb-btn rb-btn-pri rb-btn-block" style={{ marginTop: 14 }} disabled={busy || (!sent && cooldown > 0)}>{busy ? "Please wait?" : sent ? "Verify and enter" : "Send verification code"}</button>
-      </form>
-      {msg && <p className="rb-hint" role="status" aria-live="polite">{msg}</p>}
-      {sent && <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={sendCode} disabled={busy || cooldown > 0}>{cooldown ? "Resend in " + cooldown + "s" : "Resend code"}</button><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={() => { setSent(false); setCode(""); setMsg(""); }}>Change email</button></div>}
-      {!sent && <p className="rb-hint"><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={() => { setMode(mode === "login" ? "register" : "login"); setMsg(""); }}>{mode === "login" ? "New here? Sign up" : "Already registered? Sign in"}</button></p>}
-    </div>
-  </div></Centered>;
-}
-
 export default function App(){
-  const [session, setSession] = useState(undefined);
-  const [authError, setAuthError] = useState("");
-  const [verifiedToken, setVerifiedToken] = useState(null);
-  useEffect(() => {
-    if (!supabase) return;
-    let active = true;
-    supabase.auth.getSession().then(({ data, error }) => {
-      if (!active) return;
-      if (error) setAuthError(error.message);
-      setSession(data?.session || null);
-    }).catch(() => { if (active) { setAuthError("Could not restore your session. Please sign in again."); setSession(null); } });
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => { if (active) setSession(next); });
-    return () => { active = false; data.subscription.unsubscribe(); };
-  }, []);
-  useEffect(() => {
-    setVerifiedToken(null);
-    if (!supabase || !session) return;
-    let active = true;
-    const validate = async () => {
-      try {
-        const { data, error } = await supabase.auth.getUser(session.access_token);
-        if (!active) return;
-        if (error || !data.user?.email_confirmed_at || data.user.is_anonymous) {
-          setAuthError("Your previous session is no longer valid. Please sign in again.");
-          setSession(null);
-          await supabase.auth.signOut({ scope: "local" });
-          return;
-        }
-        setAuthError("");
-        setVerifiedToken(session.access_token);
-      } catch {
-        if (active) { setAuthError("Could not verify your session. Please sign in again."); setSession(null); }
-      }
-    };
-    validate();
-    return () => { active = false; };
-  }, [session]);
-  if (!supabase) return <Centered><div className="rb-card"><div className="rb-cb"><h2>Sign-in setup required</h2><p>Configure the Supabase URL and public key to enable email verification. Access is unavailable until sign-in is configured.</p></div></div></Centered>;
-  if (session === undefined || (session && verifiedToken !== session.access_token)) return <Centered><Loader2 className="spin" aria-label="Loading sign-in" /></Centered>;
-  if (!session?.user?.email_confirmed_at || session.user.is_anonymous) return <><AuthScreen />{authError && <p role="alert">{authError}</p>}</>;
-  return <div className="rb-root"><style>{CSS}</style><div style={{ maxWidth: 1180, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "flex-end", gap: 12 }}><span>{session.user.email}</span><button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={async () => { const { error } = await supabase.auth.signOut(); if (error) setAuthError(error.message); else setSession(null); }}>Sign out</button></div>{authError && <p role="alert">{authError}</p>}<ResumeAppMemo key={session.user.id} userId={session.user.id} /></div>;
+  return <div className="rb-root"><style>{CSS}</style><AccessShell supabase={supabase}>{(user, account, refresh) => <ResumeAppMemo key={user.id} userId={user.id} account={account} onUsageChange={refresh} />}</AccessShell></div>;
 }

@@ -8,10 +8,10 @@ const { requireUser } = await import('data:text/javascript;base64,' + Buffer.fro
 
 test('API authentication rejects invalid accounts and permits confirmed new accounts', async () => {
   const saved = { ...process.env };
-  const check = async (user, error = null, authorization = 'Bearer test') => {
+  const check = async (user, error = null, authorization = 'Bearer test', options = {}) => {
     globalThis.authTestClient = () => ({ auth: { getUser: async () => ({ data: { user }, error }) } });
     const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
-    return { user: await requireUser({ headers: { authorization } }, res), res };
+    return { user: await requireUser({ headers: { authorization } }, res, options), res };
   };
   try {
     delete process.env.SUPABASE_URL; delete process.env.VITE_SUPABASE_URL;
@@ -21,6 +21,8 @@ test('API authentication rejects invalid accounts and permits confirmed new acco
     assert.equal((await check(null, null, '')).res.code, 401);
     assert.equal((await check(null, new Error('bad token'))).res.code, 401);
     assert.equal((await check({ id: 'unconfirmed' })).res.code, 401);
+    assert.equal((await check({ id: 'guest', is_anonymous: true, created_at: '2026-10-20' }, null, 'Bearer test', { allowAnonymous: true })).user.id, 'guest');
+    assert.equal((await check({ id: 'unverified', is_anonymous: false }, null, 'Bearer test', { allowAnonymous: true })).res.code, 401);
     const user = { id: 'new', email_confirmed_at: '2026-10-20', created_at: '2026-10-20T12:00:00Z' };
     assert.equal((await check({ ...user, is_anonymous: true })).res.code, 401);
     process.env.AUTH_USERS_VALID_AFTER = '2026-10-20T11:00:00Z';
