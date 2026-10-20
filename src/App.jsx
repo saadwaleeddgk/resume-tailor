@@ -2304,6 +2304,7 @@ function AuthScreen(){
 export default function App(){
   const [session, setSession] = useState(undefined);
   const [authError, setAuthError] = useState("");
+  const [verifiedToken, setVerifiedToken] = useState(null);
   useEffect(() => {
     if (!supabase) return;
     let active = true;
@@ -2315,8 +2316,31 @@ export default function App(){
     const { data } = supabase.auth.onAuthStateChange((_event, next) => { if (active) setSession(next); });
     return () => { active = false; data.subscription.unsubscribe(); };
   }, []);
+  useEffect(() => {
+    setVerifiedToken(null);
+    if (!supabase || !session) return;
+    let active = true;
+    const validate = async () => {
+      try {
+        const { data, error } = await supabase.auth.getUser(session.access_token);
+        if (!active) return;
+        if (error || !data.user?.email_confirmed_at || data.user.is_anonymous) {
+          setAuthError("Your previous session is no longer valid. Please sign in again.");
+          setSession(null);
+          await supabase.auth.signOut({ scope: "local" });
+          return;
+        }
+        setAuthError("");
+        setVerifiedToken(session.access_token);
+      } catch {
+        if (active) { setAuthError("Could not verify your session. Please sign in again."); setSession(null); }
+      }
+    };
+    validate();
+    return () => { active = false; };
+  }, [session]);
   if (!supabase) return <Centered><div className="rb-card"><div className="rb-cb"><h2>Sign-in setup required</h2><p>Configure the Supabase URL and public key to enable email verification. Access is unavailable until sign-in is configured.</p></div></div></Centered>;
-  if (session === undefined) return <Centered><Loader2 className="spin" aria-label="Loading sign-in" /></Centered>;
+  if (session === undefined || (session && verifiedToken !== session.access_token)) return <Centered><Loader2 className="spin" aria-label="Loading sign-in" /></Centered>;
   if (!session?.user?.email_confirmed_at || session.user.is_anonymous) return <><AuthScreen />{authError && <p role="alert">{authError}</p>}</>;
   return <div className="rb-root"><style>{CSS}</style><div style={{ maxWidth: 1180, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "flex-end", gap: 12 }}><span>{session.user.email}</span><button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={async () => { const { error } = await supabase.auth.signOut(); if (error) setAuthError(error.message); else setSession(null); }}>Sign out</button></div>{authError && <p role="alert">{authError}</p>}<ResumeAppMemo key={session.user.id} userId={session.user.id} /></div>;
 }
