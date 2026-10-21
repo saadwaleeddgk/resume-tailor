@@ -1,3 +1,4 @@
+import "./workspace.css";
 import AccessShell from "./AccessShell.jsx";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -1354,6 +1355,24 @@ function ResumeApp({ userId, account, onUsageChange }){
   const sheetRef = useRef(null);
   const fileRef = useRef(null);
 
+  useEffect(() => {
+    const grid = document.querySelector(".workspace-grid");
+    if (!grid) return;
+    const update = () => {
+      const top = grid.getBoundingClientRect().top;
+      grid.style.setProperty("--workspace-height", Math.max(380, window.innerHeight - top - 20) + "px");
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    const wrapper = grid.closest(".tailoring-workspace");
+    if (wrapper) observer.observe(wrapper);
+    // Account banners and approval forms can change the space above the workspace.
+    const accountHeader = wrapper?.parentElement?.previousElementSibling;
+    if (accountHeader && accountHeader !== wrapper) observer.observe(accountHeader);
+    window.addEventListener("resize", update);
+    return () => { observer.disconnect(); window.removeEventListener("resize", update); };
+  }, []);
+
   /* load persisted state once */
   useEffect(() => {
     (async () => {
@@ -1724,14 +1743,14 @@ function ResumeApp({ userId, account, onUsageChange }){
   return (
     <div className="rb-root">
       <style>{CSS}</style>
-      <div className="rb-wrap">
+      <div className="rb-wrap tailoring-workspace">
 
         {/* header */}
         <div className="rb-head no-print">
           <div className="rb-brand">
             <div className="rb-mark"><Sparkles size={20} /></div>
             <div>
-              <h1>Resume Tailor</h1>
+              <h1>Your next chapter, tailored.</h1>
               <p>Match your resume to any U.S. job — ATS-ready, recruiter-friendly, factual.</p>
             </div>
           </div>
@@ -1749,9 +1768,10 @@ function ResumeApp({ userId, account, onUsageChange }){
           </div>
         )}
 
-        <div className="rb-grid">
-          {/* LEFT: inputs */}
-          <div className="no-print">
+        <div className="rb-grid workspace-grid">
+          {/* LEFT: independently scrolling inputs */}
+          <aside className="workspace-inputs no-print" aria-label="Resume setup" tabIndex={0}>
+            <div className="workspace-column-heading"><span className="workspace-kicker">THE BRIEF</span><h2>Make it your own</h2><p>Add your experience, choose a role, and find your style.</p></div>
             {/* master resume */}
             <div className="rb-card">
               <div className="rb-ch">
@@ -1827,10 +1847,12 @@ function ResumeApp({ userId, account, onUsageChange }){
               </div>
             </div>
 
-          </div>
+          </aside>
 
-          {/* RIGHT: results */}
-          <div>
+          {/* RIGHT: stationary frame with its own document viewer */}
+          <section className="workspace-results" aria-label="Tailored resume results">
+            <div className="workspace-preview-heading no-print"><div><span className="workspace-kicker">YOUR WORKSPACE</span><h2>Resume preview</h2></div><span className={"workspace-status" + (busy ? " is-working" : "")}>{busy ? "Tailoring" : result ? "Ready to review" : "Ready when you are"}</span></div>
+            <div className="workspace-results-body" tabIndex={0} aria-label="Resume preview and analysis">
             {busy && !result && (
               <div className="loadbox no-print">
                 <Loader2 size={26} className="spin" style={{ color: "var(--green)" }} />
@@ -2223,7 +2245,8 @@ function ResumeApp({ userId, account, onUsageChange }){
                 )}
               </>
             )}
-          </div>
+            </div>
+          </section>
         </div>
       </div>
     </div>
