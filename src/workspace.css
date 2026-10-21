@@ -96,3 +96,49 @@
   .workspace-results, .workspace-results-body { display: block; height: auto; overflow: visible; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: white; }
   .workspace-inputs, .workspace-column-heading, .workspace-preview-heading { display: none; }
 }
+
+/* Keep chrome compact so the document, rather than its headings, fills the screen. */
+.access-header { max-width: 1480px; margin: 0 auto; padding: 8px 28px 0; }
+.access-header .access-card { border-radius: 10px; box-shadow: none; }
+.access-header .access-card > .rb-cb { padding: 9px 14px; }
+.access-summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 12px; font-size: 12px; }
+.access-summary .rb-hint { margin: 0; font-size: 11px; }
+.access-header .access-card .rb-btn { padding: 6px 10px; font-size: 11px; }
+.access-help { margin-top: 4px; font-size: 10px; color: #68746e; }
+.access-help summary { cursor: pointer; width: fit-content; }
+.access-help .rb-hint { margin-top: 4px; }
+.rb-root .tailoring-workspace { padding-top: 0; padding-bottom: 12px; }
+.tailoring-workspace .rb-head { padding: 10px 0; gap: 10px; }
+.tailoring-workspace .rb-mark { width: 32px; height: 32px; border-radius: 9px; }
+.tailoring-workspace .rb-brand { gap: 9px; }
+.tailoring-workspace .rb-brand h1 { font-size: 18px; letter-spacing: -.4px; }
+.tailoring-workspace .rb-brand p { display: none; }
+.tailoring-workspace .rb-step { padding: 5px 8px; font-size: 10px; }
+.rb-root .workspace-grid { min-height: 260px; }
+.workspace-column-heading { padding: 0 4px 10px; }
+.workspace-column-heading .workspace-kicker, .workspace-column-heading p { display: none; }
+.workspace-column-heading h2 { font-size: 14px; margin: 0; }
+.workspace-preview-heading { padding: 9px 14px; gap: 8px; flex-wrap: wrap; }
+.workspace-preview-heading h2 { font-size: 14px; margin: 0; }
+.workspace-export-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.workspace-export-actions .rb-btn { font-size: 11px; padding: 7px 10px; }
+.workspace-export-actions .workspace-status { font-size: 10px; }
+.workspace-results .workspace-result-tabs {
+  position: static; flex: none; display: flex; flex-wrap: wrap; gap: 2px;
+  overflow: visible; margin: 0; padding: 5px 8px; border: 0;
+  border-bottom: 1px solid #d6dfd7; border-radius: 0;
+  box-shadow: none; background: #f9fbf7;
+}
+.workspace-result-tabs .rb-tab { padding: 6px 8px; font-size: 11px; gap: 5px; }
+.workspace-results-body { padding: 12px 14px 24px; }
+.workspace-results-body .rb-panel { margin-top: 0; }
+@media (max-width: 760px) {
+  .access-header { padding: 8px 18px 0; }
+  .tailoring-workspace .rb-head { padding: 10px 0; }
+  .workspace-export-actions .workspace-status { display: none; }
+  .workspace-preview-heading { align-items: center; }
+  .rb-root .workspace-grid { min-height: 0; }
+}
+@media print {
+  .access-header, .workspace-result-tabs { display: none !important; }
+}

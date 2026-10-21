@@ -1360,7 +1360,7 @@ function ResumeApp({ userId, account, onUsageChange }){
     if (!grid) return;
     const update = () => {
       const top = grid.getBoundingClientRect().top;
-      grid.style.setProperty("--workspace-height", Math.max(380, window.innerHeight - top - 20) + "px");
+      grid.style.setProperty("--workspace-height", Math.max(260, window.innerHeight - top - 12) + "px");
     };
     update();
     const observer = new ResizeObserver(update);
@@ -1681,6 +1681,14 @@ function ResumeApp({ userId, account, onUsageChange }){
     }
   };
 
+  const exportFromPreview = async (format) => {
+    // Mount the resume sheet before exporting from an analysis or ATS tab.
+    setTab("resume"); setView("recruiter");
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (format === "pdf") await downloadPDF();
+    else await downloadDOCX();
+  };
+
   const toggleEdit = () => {
     if (sheetRef.current) setEditedHTML(sheetRef.current.innerHTML); // snapshot current content (structured or edited)
     setEditing(e => !e); setShowSug(false);
@@ -1851,7 +1859,19 @@ function ResumeApp({ userId, account, onUsageChange }){
 
           {/* RIGHT: stationary frame with its own document viewer */}
           <section className="workspace-results" aria-label="Tailored resume results">
-            <div className="workspace-preview-heading no-print"><div><span className="workspace-kicker">YOUR WORKSPACE</span><h2>Resume preview</h2></div><span className={"workspace-status" + (busy ? " is-working" : "")}>{busy ? "Tailoring" : result ? "Ready to review" : "Ready when you are"}</span></div>
+            <div className="workspace-preview-heading no-print">
+              <h2>Resume preview</h2>
+              <div className="workspace-export-actions">
+                <span className={"workspace-status" + (busy ? " is-working" : "")}>{busy ? "Tailoring" : result ? "Ready" : "No resume yet"}</span>
+                {result && <>
+                  <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => exportFromPreview("word")} disabled={docxBusy || pdfBusy || busy}><FileText size={14} />{docxBusy ? "Building..." : "Download Word"}</button>
+                  <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={() => exportFromPreview("pdf")} disabled={pdfBusy || docxBusy || busy}><Download size={14} />{pdfBusy ? "Building..." : "Download PDF"}</button>
+                </>}
+              </div>
+            </div>
+            {result && <nav className="rb-tabs workspace-result-tabs no-print" aria-label="Result sections">
+              {TABS.map(({ id, label, Icon }) => <button key={id} className={"rb-tab" + (tab === id ? " on" : "")} onClick={() => setTab(id)}><Icon size={13} />{label}</button>)}
+            </nav>}
             <div className="workspace-results-body" tabIndex={0} aria-label="Resume preview and analysis">
             {busy && !result && (
               <div className="loadbox no-print">
@@ -1871,14 +1891,6 @@ function ResumeApp({ userId, account, onUsageChange }){
 
             {result && (
               <>
-                <div className="rb-tabs no-print">
-                  {TABS.map(({ id, label, Icon }) => (
-                    <button key={id} className={"rb-tab" + (tab === id ? " on" : "")} onClick={() => setTab(id)}>
-                      <Icon size={14} /> {label}
-                    </button>
-                  ))}
-                </div>
-
                 {/* RESUME TAB */}
                 {tab === "resume" && (
                   <div className="rb-panel">
@@ -1900,8 +1912,6 @@ function ResumeApp({ userId, account, onUsageChange }){
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("expand")} disabled={!fullAccess || busy || editing}><RefreshCw size={13} /> Fuller</button>
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={() => adjustLength("condense")} disabled={!fullAccess || busy || editing}><RefreshCw size={13} /> Tighter</button>
                         <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadHTML}><FileDown size={13} /> HTML</button>
-                        <button className="rb-btn rb-btn-ghost rb-btn-sm" onClick={downloadDOCX} disabled={docxBusy}>{docxBusy ? <><Loader2 size={13} className="spin" /> Building…</> : <><FileText size={13} /> Export DOCX</>}</button>
-                        <button className="rb-btn rb-btn-acc rb-btn-sm" onClick={downloadPDF} disabled={pdfBusy}>{pdfBusy ? <><Loader2 size={13} className="spin" /> Building…</> : <><Download size={13} /> Export PDF</>}</button>
                       </div>
                     </div>
 

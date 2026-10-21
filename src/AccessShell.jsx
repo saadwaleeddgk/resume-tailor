@@ -59,17 +59,17 @@ export default function AccessShell({ supabase, children }) {
   if (!session || !account || account.user_id !== session.user.id) return <Card><h2>{error ? 'Access setup needed' : 'Preparing your free trial…'}</h2><p role="alert">{error}</p><button className="rb-btn rb-btn-ghost" onClick={() => window.location.reload()}>Retry</button></Card>;
   const approved = account.is_admin || account.status === 'approved';
   return <>
-    <div style={{ maxWidth: 1180, margin: '0 auto', padding: '16px 20px' }}>
-      <div className="rb-card"><div className="rb-cb">
+    <div className="access-header">
+      <div className="rb-card access-card"><div className="rb-cb">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <div><b>{approved ? 'Full access' : account.status === 'pending' ? 'Awaiting admin approval' : account.status === 'rejected' ? 'Access request declined' : 'Free trial'}</b><p className="rb-hint">{session.user.email || 'Try Resume Tailor without registering'} · {approved ? 'All features unlocked' : account.remaining + ' of 4 free resumes remaining'}</p></div>
+          <div className="access-summary"><b>{approved ? 'Full access' : account.status === 'pending' ? 'Awaiting admin approval' : account.status === 'rejected' ? 'Access request declined' : 'Free trial'}</b><p className="rb-hint">{session.user.email || 'Try Resume Tailor without registering'} · {approved ? 'All features unlocked' : account.remaining + ' of 4 free resumes remaining'}</p></div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {!approved && account.status === 'trial' && <button className="rb-btn rb-btn-pri" onClick={() => setPanel(panel === 'register' ? '' : 'register')}>Register for full access</button>}
             {session.user.is_anonymous ? <button className="rb-btn rb-btn-ghost" onClick={() => setPanel(panel === 'login' ? '' : 'login')}>Already registered? Sign in</button> : <button className="rb-btn rb-btn-ghost" onClick={async () => { const result = await supabase.auth.signOut(); if (result.error) setError(result.error.message); else window.location.reload(); }}>Sign out</button>}
             {account.is_admin && <button className="rb-btn rb-btn-ghost" onClick={() => setPanel(panel === 'admin' ? '' : 'admin')}>Manage approvals</button>}
           </div>
         </div>
-        {!approved && <p className="rb-hint">{account.status === 'pending' ? 'Your email is verified and your request is waiting for an administrator. This page checks for approval automatically.' : account.status === 'rejected' ? 'An administrator declined your request. Contact the site owner for access.' : 'Four completed tailored resumes are free. Register with an email and password, verify your code, and request approval to continue. Additional AI tools require approval.'}</p>}
+        {!approved && <details className="access-help"><summary>About access</summary><p className="rb-hint">{account.status === 'pending' ? 'Your email is verified and your request is waiting for an administrator. This page checks for approval automatically.' : account.status === 'rejected' ? 'An administrator declined your request. Contact the site owner for access.' : 'Four completed tailored resumes are free. Register with an email and password, verify your code, and request approval to continue. Additional AI tools require approval.'}</p></details>}
         {error && <p className="rb-err" role="alert">{error}</p>}
       </div></div>
       {panel === 'register' && <Registration supabase={supabase} session={session} api={api} done={async () => { setPanel(''); await refresh(); }} />}
