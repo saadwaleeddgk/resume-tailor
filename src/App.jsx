@@ -2255,9 +2255,6 @@ function ResumeApp({ userId, account, onUsageChange }){
 // Keep authentication updates from interrupting resume editing.
 const ResumeAppMemo = React.memo(ResumeApp);
 
-/* ============================================================ */
-/*  Authentication + admin approval layer (wraps the resume app) */
-/* ============================================================ */
 export default function App(){
   return <div className="rb-root"><style>{CSS}</style><AccessShell supabase={supabase}>{(user, account, refresh) => <ResumeAppMemo key={user.id} userId={user.id} account={account} onUsageChange={refresh} />}</AccessShell></div>;
 }
