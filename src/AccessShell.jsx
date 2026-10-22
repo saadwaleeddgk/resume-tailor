@@ -1,4 +1,5 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+import TrialSignIn from "./TrialSignIn.jsx";
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
 export default function AccessShell({ supabase, children }) {
@@ -31,16 +32,14 @@ export default function AccessShell({ supabase, children }) {
       if (error) throw error;
       if (data.session) {
         const checked = await supabase.auth.getUser(data.session.access_token);
-        if (!checked.error && checked.data.user) return data.session;
+        if (!checked.error && checked.data.user?.email_confirmed_at && !checked.data.user.is_anonymous) return data.session;
         await supabase.auth.signOut({ scope: 'local' });
       }
-      const guest = await supabase.auth.signInAnonymously();
-      if (guest.error) throw guest.error;
-      return guest.data.session;
+      return null;
     })();
     starting.current.then(s => { if (active) setSession(s); }).catch(e => { if (active) { setError(e.message); setSession(null); } });
     const { data } = supabase.auth.onAuthStateChange((_event, next) => {
-      if (active) { setSession(previous => { if (previous?.user.id !== next?.user.id) setAccount(null); return next; }); }
+      if (active) { setSession(previous => { if (previous?.user.id !== next?.user.id) setAccount(null); return next?.user?.email_confirmed_at && !next.user.is_anonymous ? next : null; }); }
     });
     return () => { active = false; data.subscription.unsubscribe(); };
   }, [supabase]);
@@ -56,20 +55,26 @@ export default function AccessShell({ supabase, children }) {
     return () => { active = false; clearInterval(timer); };
   }, [session, api]);
   if (!supabase) return <Card><h2>Sign-in setup required</h2><p>Configure the Supabase URL and public key.</p></Card>;
-  if (!session || !account || account.user_id !== session.user.id) return <Card><h2>{error ? 'Access setup needed' : 'Preparing your free trial…'}</h2><p role="alert">{error}</p><button className="rb-btn rb-btn-ghost" onClick={() => window.location.reload()}>Retry</button></Card>;
+  if (session === undefined) return <Card><h2>Checking your session...</h2></Card>;
+  if (!session) return <>
+    {panel === 'login' ? <Card><Login supabase={supabase} done={() => setPanel('')} /><button className="rb-btn rb-btn-ghost" onClick={() => setPanel('')}>Start a free trial</button></Card> : <TrialSignIn supabase={supabase} onSignIn={() => setPanel('login')} />}
+    {error && <Card><p role="alert">{error}</p></Card>}
+  </>;
+  if (!account || account.user_id !== session.user.id) return <Card><h2>{error ? 'Access setup needed' : 'Loading your allowance...'}</h2><p role="alert">{error}</p><button className="rb-btn rb-btn-ghost" onClick={() => window.location.reload()}>Retry</button></Card>;
   const approved = account.is_admin || account.status === 'approved';
   return <>
     <div className="access-header">
       <div className="rb-card access-card"><div className="rb-cb">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <div className="access-summary"><b>{approved ? 'Full access' : account.status === 'pending' ? 'Awaiting admin approval' : account.status === 'rejected' ? 'Access request declined' : 'Free trial'}</b><p className="rb-hint">{session.user.email || 'Try Resume Tailor without registering'} · {approved ? 'All features unlocked' : account.remaining + ' of 4 free resumes remaining'}</p></div>
+          <div className="access-summary"><b>{approved ? 'Full access' : account.status === 'pending' ? 'Awaiting admin approval' : account.status === 'rejected' ? 'Access request declined' : 'Free trial'}</b><p className="rb-hint">{session.user.email} · {approved ? 'All features unlocked' : account.accountRemaining + ' of 4 account credits remaining | ' + account.ipRemaining + ' network credits today'}</p></div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!approved && account.status === 'trial' && <button className="rb-btn rb-btn-pri" onClick={() => setPanel(panel === 'register' ? '' : 'register')}>Register for full access</button>}
+            {!approved && account.status === 'trial' && <button className="rb-btn rb-btn-pri" onClick={() => setPanel(panel === 'register' ? '' : 'register')}>Request full access</button>}
             {session.user.is_anonymous ? <button className="rb-btn rb-btn-ghost" onClick={() => setPanel(panel === 'login' ? '' : 'login')}>Already registered? Sign in</button> : <button className="rb-btn rb-btn-ghost" onClick={async () => { const result = await supabase.auth.signOut(); if (result.error) setError(result.error.message); else window.location.reload(); }}>Sign out</button>}
             {account.is_admin && <button className="rb-btn rb-btn-ghost" onClick={() => setPanel(panel === 'admin' ? '' : 'admin')}>Manage approvals</button>}
           </div>
         </div>
-        {!approved && <details className="access-help"><summary>About access</summary><p className="rb-hint">{account.status === 'pending' ? 'Your email is verified and your request is waiting for an administrator. This page checks for approval automatically.' : account.status === 'rejected' ? 'An administrator declined your request. Contact the site owner for access.' : 'Four completed tailored resumes are free. Register with an email and password, verify your code, and request approval to continue. Additional AI tools require approval.'}</p></details>}
+        {!approved && <details className="access-help"><summary>About access</summary><p className="rb-hint">{account.status === 'pending' ? 'Your email is verified and your request is waiting for an administrator. This page checks for approval automatically.' : account.status === 'rejected' ? 'An administrator declined your request. Contact the site owner for access.' : 'Your verified account includes four free tailored resumes, with a shared limit of four per network per UTC day. Set a password and request admin approval for continued access and additional AI tools.'}</p></details>}
+        {!approved && account.status === 'trial' && account.ipRemaining === 0 && account.accountRemaining > 0 && <p className="rb-hint" role="status">This network has reached its daily free limit. Resets {new Date(account.ipResetAt).toLocaleString()}. Your unused account credits remain available afterward.</p>}
         {error && <p className="rb-err" role="alert">{error}</p>}
       </div></div>
       {panel === 'register' && <Registration supabase={supabase} session={session} api={api} done={async () => { setPanel(''); await refresh(); }} />}
@@ -89,7 +94,6 @@ function Registration({ supabase, session, api, done }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [cooldown, setCooldown] = useState(0);
-  const [conversion] = useState(!!session.user.is_anonymous);
   useEffect(() => { if (!cooldown) return; const timer = setTimeout(() => setCooldown(n => n - 1), 1000); return () => clearTimeout(timer); }, [cooldown]);
   const send = async () => {
     if (cooldown || busy) return;
@@ -97,9 +101,7 @@ function Registration({ supabase, session, api, done }) {
     setBusy(true); setMessage('');
     try {
       const address = email.trim().toLowerCase();
-      const result = conversion
-        ? await supabase.auth.updateUser({ email: address }, { emailRedirectTo: window.location.origin + '/' })
-        : await supabase.auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: window.location.origin + '/' } });
+      const result = await supabase.auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: window.location.origin + '/' } });
       if (result.error) throw result.error;
       setEmail(address); setStage('code'); setCooldown(60); setMessage('We sent a verification code. Check your inbox and spam folder.');
     } catch (e) { setMessage(e.message); }
@@ -111,7 +113,7 @@ function Registration({ supabase, session, api, done }) {
     try {
       let token;
       if (stage === 'code') {
-        const result = await supabase.auth.verifyOtp({ email, token: code.trim(), type: conversion ? 'email_change' : 'email' });
+        const result = await supabase.auth.verifyOtp({ email, token: code.trim(), type: 'email' });
         if (result.error) throw result.error;
         token = result.data.session?.access_token;
         setStage('finish');
@@ -125,7 +127,7 @@ function Registration({ supabase, session, api, done }) {
   };
   return <div className="rb-card"><div className="rb-cb"><h2>Request full access</h2>
     <form onSubmit={e => { e.preventDefault(); if (stage === 'email') send(); else finish(); }}>
-      <label className="rb-lbl" htmlFor="register-email">Email</label><input id="register-email" className="rb-in" type="email" required value={email} disabled={busy || stage !== 'email' || !conversion} onChange={e => setEmail(e.target.value)} autoComplete="email" />
+      <label className="rb-lbl" htmlFor="register-email">Email</label><input id="register-email" className="rb-in" type="email" required value={email} disabled onChange={e => setEmail(e.target.value)} autoComplete="email" />
       <label className="rb-lbl" htmlFor="register-password">Password</label><input id="register-password" className="rb-in" type="password" required minLength={10} maxLength={128} value={password} disabled={busy} onChange={e => setPassword(e.target.value)} autoComplete="new-password" />
       <label className="rb-lbl" htmlFor="register-confirm">Confirm password</label><input id="register-confirm" className="rb-in" type="password" required minLength={10} maxLength={128} value={confirm} disabled={busy} onChange={e => setConfirm(e.target.value)} autoComplete="new-password" />
       {stage === 'code' && <><label className="rb-lbl" htmlFor="register-code">Email verification code</label><input id="register-code" className="rb-in" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" maxLength={10} value={code} onChange={e => setCode(e.target.value)} /></>}

@@ -37,35 +37,34 @@ For local API calls, run the API server separately if you use `server.js`; Vite 
 
 The Vercel Hobby plan is suitable for personal/non-commercial testing, subject to Vercel's current Hobby limits and terms.
 
-## Four-resume guest trial and approved accounts
+## Verified-account trial, shared daily IP quota, and approved accounts
 
-Visitors receive an anonymous Supabase session, without entering an email. Each session
-can complete four tailored resumes and export them. The server owns the prompts and
-runs the complete analysis/tailoring/scoring pipeline in one request. A database row
-lock reserves each trial slot, including concurrent requests. Failed attempts release
-slots; crashed reservations expire after 20 minutes. Stable request IDs recover completed
-results without charging again. Only administrators and approved accounts can use the
-generic AI route for suggestions, length changes, cover letters, outreach and interview prep.
+Visitors verify their email with an OTP before entering the editor. Each verified account
+can complete four free resumes in total. Trial accounts also share a limit of four completed
+resumes per public IP per UTC calendar day. Both limits include active reservations to prevent
+parallel requests exceeding the quota. Failed attempts release slots; crashed reservations
+expire after 20 minutes. Replaying a completed request returns the same result without charging again.
 
-After the trial, registration links an email to the anonymous identity, verifies an emailed
-OTP, sets a password, and requests admin approval. Registration can also be requested
-earlier, which locks generation while approval is pending. Existing email-only users must
-set a password and request approval too. The in-app returning-user flow checks a password
-and then verifies an email OTP. Supabase still supports OTP-only authentication through
-its own API; this UI flow is not an enforced Supabase MFA factor.
+Approved users and administrators bypass both trial limits. After the trial, the user sets
+a password, verifies a fresh email code, and requests admin approval. Pending and rejected
+accounts cannot generate more resumes. The generic AI route requires approval.
+The in-app password login also asks for email OTP; Supabase itself still supports OTP-only
+sign-in, so this is not an enforced Supabase MFA factor.
 
 ### Required Supabase setup before running
 
 Use a separate development Supabase project if you want to avoid test accounts in production.
 
 1. In SQL Editor, run the complete contents of
-   [the migration](supabase/migrations/20261020_trial_access.sql).
+   [the base migration](supabase/migrations/20261020_trial_access.sql), followed by
+   [the IP-limit migration](supabase/migrations/20261021_verified_ip_limits.sql).
+   If the base migration is already installed, run only the new IP-limit migration.
    It creates app_accounts, tailoring_jobs and the atomic reservation function.
    Browser roles cannot read or change these tables or execute the reservation function.
-2. Enable **Anonymous sign-ins**, **Allow new signups**, **Email**, **Confirm email**, and
-   **manual identity linking** in Authentication settings. Email confirmation must stay enabled.
-3. Configure custom SMTP. Save your OTP HTML containing {{ .Token }} in **Change email address**,
-   **Confirm signup**, and **Magic Link**. Guest conversion uses the Change email template.
+2. Enable **Allow new signups**, **Email**, and **Confirm email**. Disable **Anonymous sign-ins**.
+   Email confirmation must stay enabled; manual identity linking is no longer needed.
+   Existing anonymous sessions are signed out and cannot call the tailoring API.
+3. Configure custom SMTP. Save your OTP HTML containing {{ .Token }} in **Confirm signup** and **Magic Link**.
 4. Add http://localhost:5173/ to Authentication ? URL Configuration ? Redirect URLs.
    Leave your production Site URL set to your Vercel URL. If Vite uses another port, allow it too.
 5. Add VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY and one AI
@@ -110,22 +109,18 @@ npm.cmd run dev
 Visit the printed URL (normally http://localhost:5173/). The Vite proxy forwards API
 requests to the same handlers used on Vercel, on local port 3001.
 
-1. Open an incognito window. The editor should open without registration and show 4 remaining.
-2. Generate four resumes. Each successful result reduces the allowance by one. Refreshing
-   the same browser session must retain the count. The fifth generation is blocked.
-3. Test failure with a development provider configuration that returns an error: the count
-   must not drop. Retry the same submitted request after a connection failure; it must not
-   consume a second slot. Do not change production provider keys for this test.
-4. Register the guest with a test email and matching password (10?128 characters). Enter
-   the Change email OTP. Wrong/expired codes must fail. Password creation and approval
-   submission happen only after email verification. The user should now see pending approval.
-5. In your normal browser, sign in as the bootstrapped admin, open Manage approvals and
-   approve the test user. Within 15 seconds, the test user's account should unlock.
-6. Generate another resume and use cover-letter/interview tools. Reject/revoke the user
-   and confirm that new generation requests are blocked again.
-7. Sign out and test returning sign-in with password plus email OTP. Test a different user
-   to confirm their local resume history is separate. Signing in to an existing account does
-   not merge an unrelated guest session's local history.
+1. Open an incognito window. Verify email account A with its OTP before the editor appears.
+2. Generate four resumes. The account and network allowances both drop. A fifth request is blocked.
+3. Sign in using email account B in another browser on the same network. Its account allowance
+   is fresh but its network allowance must be zero; generation is blocked with a daily-IP message.
+4. After the next midnight UTC, B can use its remaining account credits, but A still has no
+   account credits. The IP reset does not reset the lifetime account allowance.
+5. In local development, all browsers connect through the same loopback IP and share its daily
+   quota. Do not fake X-Forwarded-For headers locally; the server intentionally ignores them.
+6. Request full access, verify a fresh OTP, set a password and submit. Approve from your admin
+   account and confirm tailoring plus other AI tools unlock despite exhausted trial allowances.
+7. Test failures and retries: provider failures must not consume either quota; a completed
+   request replay must not consume another slot. Wrong OTPs and anonymous tokens must fail.
 8. Run checks:
 
 ```powershell
@@ -143,17 +138,34 @@ Apply the migration and auth/template settings to the production Supabase projec
 Set the same required environment variables in Vercel Production and redeploy. The tailoring
 function requests a 300-second runtime; actual availability depends on your hosting configuration.
 
-### Trial limitations and stored data
+### IP handling, limits, and stored data
 
-The trial is per anonymous browser identity, not per human. Clearing browser data or
-using a different browser creates a new trial. CAPTCHA and anonymous-user cleanup are
-recommended before public launch. Anonymous sessions use Supabase's authenticated role;
-review policies on any other existing tables before enabling them.
+Daily IP buckets use midnight UTC, not each visitor's local midnight. The browser displays
+the reset time in its local time zone. Account credits never reset daily. Existing account
+job counts are preserved; historical jobs without IP metadata are not retroactively counted
+against today's IP bucket.
+
+The Vercel runtime reads its platform-provided X-Forwarded-For header. Direct/local Express
+uses the socket address and ignores client-supplied forwarding headers. Non-Vercel reverse
+proxy deployments need a deliberately configured trusted-proxy strategy before use. Missing
+or invalid trusted IPs fail closed for trial generation. Approved users do not need an IP bucket.
+
+Only HMAC digests of IP addresses are stored, not raw addresses. Set an optional stable
+server-only IP_QUOTA_SECRET to a random value; otherwise SUPABASE_SERVICE_ROLE_KEY is
+used. Never prefix it with VITE_. Keep it the same across deployments sharing a database.
+Rotating that secret (or the service key when used as fallback) resets effective IP buckets.
+Vercel reference: https://vercel.com/docs/headers/request-headers
+
+Shared Wi-Fi users share the daily allowance. VPNs, network changes and multiple distinct
+IPv6 addresses may bypass the network layer, but do not reset a verified account's credits.
+This does not identify a physical device and does not include VPN detection. CAPTCHA can
+be added separately to reduce automated registrations.
 
 Completed job results (structured resume, analysis, assessment) are stored in private Supabase
 rows for retry recovery, alongside quota and approval metadata. They are not Word files or
-a cross-device resume library. Local editor history still lives in browser storage. Decide a
-retention policy before public launch; deleting completed job rows also resets their quota count.
+a cross-device resume library. Local editor history still lives in browser storage. Deleting
+completed jobs resets their quota contribution; keep counts when designing data retention.
 
-References: https://supabase.com/docs/guides/auth/auth-anonymous and
-https://supabase.com/docs/guides/database/functions
+Automated tests mock Supabase/provider responses and test IP normalization/header trust.
+The migration and real cross-account database concurrency must also be verified against
+your development Supabase project before production rollout.

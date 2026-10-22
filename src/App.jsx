@@ -1458,7 +1458,7 @@ function ResumeApp({ userId, account, onUsageChange }){
 
   const optimize = async () => {
     if(!master.trim() || !jd.trim()) return;
-    if (!account.is_admin && account.status !== "approved" && (account.status !== "trial" || account.remaining === 0)) { setError("Register and obtain admin approval to continue tailoring."); return; }
+    if (!account.is_admin && account.status !== "approved" && (account.status !== "trial" || account.remaining === 0)) { setError(account.accountRemaining > 0 && account.ipRemaining === 0 ? "This network has used its daily free allowance. Try after the reset time or request admin approval." : "Your account trial is complete. Request admin approval to continue tailoring."); return; }
     setBusy(true); setError(""); setResult(null); setCover(""); setOutreach(null); setPrep(null); setPages(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
     try {
       setStage("Analyzing the role, tailoring your resume, and checking fit");
