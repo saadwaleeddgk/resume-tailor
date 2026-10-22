@@ -22,13 +22,32 @@ const clampTokens = (n) => {
   return Math.min(Math.max(v, 256), TOKEN_CAP);
 };
 
-async function fetchTimeout(url, opts, ms) {
+export async function fetchTimeout(url, opts, ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
-  try { return await fetch(url, { ...opts, signal: ctrl.signal }); } finally { clearTimeout(t); }
+  try {
+    const response = await fetch(url, { ...opts, signal: ctrl.signal });
+    if (!response.ok) {
+      // Error bodies may be HTML; their HTTP status is enough to classify them.
+      try { await response.body?.cancel(); } catch { /* best effort connection cleanup */ }
+      return { response, data: null };
+    }
+    try {
+      // Keep the timeout active until the entire body has arrived, not just headers.
+      const data = await response.json();
+      return { response, data };
+    } catch (cause) {
+      throw generationError(ctrl.signal.aborted ? "PROVIDER_TIMEOUT" : "PROVIDER_RESPONSE",
+        ctrl.signal.aborted ? "The AI response timed out while downloading. Please retry." : "The AI connection returned an incomplete or non-JSON response after automatic retries. Please try again shortly.", {
+          httpStatus: response.status,
+          contentType: response.headers?.get("content-type") || "unknown",
+          transportCode: cause.cause?.code || cause.name,
+        });
+    }
+  } finally { clearTimeout(t); }
 }
 async function callLLM(body, deadline = Date.now() + 240000) {
-  let lastResponse, lastProvider;
+  let lastResponse, lastProvider, lastFailure;
   const disabled = new Set();
   const active = PROVIDERS.filter(p => p.key);
   if (!active.length) return { error: "No API keys configured in the project settings." };
@@ -36,15 +55,15 @@ async function callLLM(body, deadline = Date.now() + 240000) {
   for (let round = 0; round < ROUNDS; round++) {
     for (const p of active) {
       if (disabled.has(p.name)) continue;
-      if (Date.now() >= deadline) return { error: "Generation deadline exceeded. Please try again." };
+      if (Date.now() >= deadline) return { failure: lastFailure || generationError("PROVIDER_TIMEOUT", "The AI generation deadline was reached. Please try again."), tried };
       try {
-        const r = await fetchTimeout(p.endpoint, {
+        const { response: r, data } = await fetchTimeout(p.endpoint, {
           method: "POST",
           headers: { "content-type": "application/json", "authorization": "Bearer " + p.key },
-          body: JSON.stringify({ ...body, model: p.model, ...(p.name === "gemini" ? { reasoning_effort: "low" } : {}) }),
+          body: JSON.stringify({ ...body, stream: false, model: p.model, ...(p.name === "gemini" ? { reasoning_effort: "low" } : {}) }),
         }, Math.min(TIMEOUT_MS, Math.max(1, deadline - Date.now())));
         if (!r.ok) {
-          lastResponse = r; lastProvider = p.name;
+          lastResponse = r; lastProvider = p.name; lastFailure = null;
           if (r.status !== 429 && r.status < 500) {
             tried.push(`${p.name}:${r.status}`); disabled.add(p.name); continue;
           }
@@ -53,12 +72,19 @@ async function callLLM(body, deadline = Date.now() + 240000) {
           if (ra > 0 && ra <= 10) await sleep(ra * 1000);
           continue;
         }
-        return { r, provider: p.name };
-      } catch { tried.push(`${p.name}:timeout`); }
+        return { r, data, provider: p.name };
+      } catch (error) {
+        const code = error.code || "PROVIDER_NETWORK";
+        tried.push(p.name + ":" + code);
+        lastResponse = null;
+        lastFailure = error.code ? error : generationError("PROVIDER_NETWORK", "The AI provider connection failed after automatic retries. Please try again shortly.");
+        lastFailure.provider = p.name;
+      }
     }
     if (disabled.size === active.length) break;
     if (round < ROUNDS - 1) await sleep(2000 + round * 3000);
   }
+  if (lastFailure) return { failure: lastFailure, tried };
   if (lastResponse) return { r: lastResponse, provider: lastProvider, tried };
   return { error: "AI providers could not be reached before the deadline.", tried };
 }
@@ -96,11 +122,9 @@ export function parseModelJSON(text) {
 async function generateJSON(system, content, tokens, deadline) {
   let budget = Math.max(4000, tokens);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const { r, provider, error } = await callLLM({ max_tokens: budget, response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content }] }, deadline);
-    if (!r) throw generationError("PROVIDER_UNREACHABLE", error);
+    const { r, data: body, provider, error, failure } = await callLLM({ max_tokens: budget, response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content }] }, deadline);
+    if (!r) throw failure || generationError("PROVIDER_UNREACHABLE", error);
     if (!r.ok) throw providerFailure(provider, r.status);
-    let body;
-    try { body = await r.json(); } catch { throw generationError("PROVIDER_RESPONSE", "The AI provider returned an unreadable response. Please retry."); }
     const choice = body?.choices?.[0];
     if (choice?.finish_reason === "length") {
       if (attempt === 0 && Date.now() < deadline) { budget *= 2; continue; }
@@ -172,10 +196,9 @@ export default async function handler(req, res) {
     const messages = [];
     if (body.system) messages.push({ role: "system", content: body.system });
     body.messages.forEach(m => messages.push({ role: m.role, content: m.content }));
-    const { r, error, tried } = await callLLM({ max_tokens: clampTokens(body.max_tokens), messages });
-    if (!r) return res.status(503).json({ error, tried });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: "The AI provider could not complete the request." });
+    const { r, data, error, tried, failure } = await callLLM({ max_tokens: clampTokens(body.max_tokens), messages });
+    if (!r) { if (failure) throw failure; return res.status(503).json({ error, tried }); }
+    if (!r.ok) throw providerFailure(undefined, r.status);
     return res.json({ content: [{ type: "text", text: data?.choices?.[0]?.message?.content || "" }] });
   } catch (error) {
     if (reserved) {
@@ -183,7 +206,7 @@ export default async function handler(req, res) {
     }
     const failure = publicFailure(error, stage);
     // Never log resumes, prompts, keys, or raw provider/database response bodies.
-    console.error("Generation failed:", { stage, code: failure.code, databaseCode: error.code, provider: error.provider, httpStatus: error.httpStatus, jobId });
+    console.error("Generation failed:", { stage, code: failure.code, databaseCode: error.code, provider: error.provider, httpStatus: error.httpStatus, contentType: error.contentType, transportCode: error.transportCode, jobId });
     return res.status(503).json({ ...failure, stage });
   }
 }

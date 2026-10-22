@@ -4,11 +4,12 @@ import { readFile } from 'node:fs/promises';
 
 process.env.OPENAI_API_KEY = 'test-only';
 const source = (await readFile(new URL('../api/claude.js', import.meta.url), 'utf8'))
+  .replace('const sleep = (ms) => new Promise(r => setTimeout(r, ms));', 'const sleep = async () => {};')
   .replace('import { ipQuotaKey } from "../lib/ip.js";', 'const ipQuotaKey = () => globalThis.trialTest.ip;')
   .replace('import { requireUser } from "../lib/auth.js";', 'const requireUser = async () => globalThis.trialTest.user;')
   .replace('import { adminClient, getAccount, isApproved } from "../lib/access.js";', 'const adminClient = () => globalThis.trialTest.db; const getAccount = async () => globalThis.trialTest.account; const isApproved = a => a.is_admin || a.status === "approved";')
   .replace('import { SYS_JD, SYS_TAILOR, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_JD = "analyze", SYS_TAILOR = "tailor", SYS_ASSESS = "assess";');
-const { default: handler, parseModelJSON } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const { default: handler, parseModelJSON, fetchTimeout } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const originalFetch = globalThis.fetch;
 function setup(status = 'trial') {
   const jobs = new Map(); let calls = 0;
@@ -103,6 +104,27 @@ test('trial pipeline, replay, access locks, and failed generation accounting', a
     assert.equal(budgets[1], budgets[0] * 2, 'truncated JSON is retried with more token budget');
     assert.equal(env.jobs.size, 1, 'model retries reserve only one credit');
     env = setup();
+    let reads = 0;
+    globalThis.fetch = async (_url, options) => {
+      const step = reads++;
+      assert.equal(JSON.parse(options.body).stream, false);
+      if (step === 1) return { status: 200, ok: true, headers: new Headers({ 'content-type': 'text/html' }), json: async () => { throw new SyntaxError('private HTML payload'); } };
+      const content = step === 0 ? { keywords: ['SQL'] } : step === 2 ? { name: 'Recovered from interrupted body', experience: [] } : {};
+      return { status: 200, ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
+    };
+    assert.equal((await request(body(1))).code, 200, 'interrupted HTTP body during tailoring is retried');
+    assert.equal(reads, 4);
+    assert.equal(env.jobs.size, 1);
+    assert.equal([...env.jobs.values()][0].state, 'completed');
+    env = setup();
+    let failures = 0;
+    globalThis.fetch = async () => { failures++; return { status: 200, ok: true, headers: new Headers({ 'content-type': 'text/html' }), json: async () => { throw new SyntaxError('private HTML payload'); } }; };
+    const unreadable = await request(body(1));
+    assert.equal(unreadable.body.code, 'PROVIDER_RESPONSE');
+    assert.equal(failures, 3, 'persistent unreadable bodies use bounded retries');
+    assert.doesNotMatch(JSON.stringify(unreadable.body), /private HTML payload/);
+    assert.equal([...env.jobs.values()][0].state, 'failed', 'read failures release the same trial reservation');
+    env = setup();
     globalThis.fetch = async () => ({ status: 401, ok: false });
     const badKey = await request(body(1));
     assert.equal(badKey.body.code, 'PROVIDER_401');
@@ -118,4 +140,14 @@ test('model JSON handles fences and trailing commas without changing quoted resu
   assert.deepEqual(parseModelJSON('{"name":"keep , } inside a string",}'), { name: 'keep , } inside a string' });
   assert.throws(() => parseModelJSON('{"name":'), { code: 'MODEL_JSON' });
   assert.throws(() => parseModelJSON(''), { code: 'MODEL_EMPTY' });
+});
+
+test('provider timeout stays active while downloading the response body', async () => {
+  const saved = globalThis.fetch;
+  try {
+    globalThis.fetch = async (_url, { signal }) => ({ status: 200, ok: true, json: () => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    }) });
+    await assert.rejects(fetchTimeout('https://example.invalid', {}, 25), { code: 'PROVIDER_TIMEOUT' });
+  } finally { globalThis.fetch = saved; }
 });
