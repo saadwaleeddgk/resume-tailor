@@ -1,3 +1,4 @@
+import { buildGeminiRequest, normalizeGeminiResponse } from "../lib/gemini.js";
 import { ipQuotaKey } from "../lib/ip.js";
 export const maxDuration = 300;
 import { requireUser } from "../lib/auth.js";
@@ -8,7 +9,7 @@ import { createHash } from "node:crypto";
 const PROVIDERS = [
   { name: "openai", endpoint: "https://api.openai.com/v1/chat/completions",                              key: process.env.OPENAI_API_KEY, model: "gpt-4o-mini" },
   { name: "groq",   endpoint: "https://api.groq.com/openai/v1/chat/completions",                          key: process.env.GROQ_API_KEY,   model: "llama-3.3-70b-versatile" },
-  { name: "gemini", endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", key: process.env.GEMINI_API_KEY, model: process.env.GEMINI_MODEL || "gemini-3.8-flash" },
+  { name: "gemini", key: process.env.GEMINI_API_KEY, model: process.env.GEMINI_MODEL || "gemini-3.8-flash" },
   { name: "gpt",    endpoint: "https://models.github.ai/inference/chat/completions",                      key: process.env.GITHUB_TOKEN,   model: "openai/gpt-4o-mini" },
 ];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -58,11 +59,16 @@ async function callLLM(body, deadline = Date.now() + 240000) {
       if (disabled.has(p.name)) continue;
       if (Date.now() >= deadline) return { failure: lastFailure || generationError("PROVIDER_TIMEOUT", "The AI generation deadline was reached. Please try again."), tried };
       try {
-        const { response, data } = await fetchTimeout(p.endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json", "authorization": "Bearer " + p.key },
-          body: JSON.stringify({ ...body, stream: false, model: p.model, ...(p.name === "gemini" ? { reasoning_effort: "low" } : {}) }),
-        }, Math.min(TIMEOUT_MS, Math.max(1, deadline - Date.now())));
+        const request = p.name === "gemini" ? buildGeminiRequest(body, p.model, p.key) : {
+          url: p.endpoint,
+          options: {
+            method: "POST",
+            headers: { "content-type": "application/json", "authorization": "Bearer " + p.key },
+            body: JSON.stringify({ ...body, stream: false, model: p.model }),
+          },
+        };
+        const { response, data: received } = await fetchTimeout(request.url, request.options, Math.min(TIMEOUT_MS, Math.max(1, deadline - Date.now())));
+        const data = p.name === "gemini" ? normalizeGeminiResponse(received) : received;
         const envelope = Array.isArray(data) ? data[0] : data;
         const embeddedError = envelope?.error;
         const embeddedStatus = Number(embeddedError?.code);
@@ -170,6 +176,7 @@ function publicFailure(error, stage) {
 }
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Resume-API-Version", "gemini-native-20261022");
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
   const user = await requireUser(req, res);
   if (!user) return;
@@ -224,6 +231,12 @@ export default async function handler(req, res) {
     const failure = publicFailure(error, stage);
     // Never log resumes, prompts, keys, or raw provider/database response bodies.
     console.error("Generation failed:", { stage, code: failure.code, databaseCode: error.code, provider: error.provider, httpStatus: error.httpStatus, contentType: error.contentType, transportCode: error.transportCode, jobId });
-    return res.status(503).json({ ...failure, stage });
+    return res.status(503).json({ ...failure, stage, diagnostic: {
+      apiVersion: "gemini-native-20261022",
+      provider: error.provider,
+      httpStatus: error.httpStatus,
+      responseType: error.contentType,
+      transportCode: error.transportCode,
+    } });
   }
 }

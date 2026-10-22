@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 process.env.OPENAI_API_KEY = 'test-only';
 const source = (await readFile(new URL('../api/claude.js', import.meta.url), 'utf8'))
+  .replace('import { buildGeminiRequest, normalizeGeminiResponse } from "../lib/gemini.js";', 'import { buildGeminiRequest, normalizeGeminiResponse } from ' + JSON.stringify(new URL('../lib/gemini.js', import.meta.url).href) + ';')
   .replace('const sleep = (ms) => new Promise(r => setTimeout(r, ms));', 'const sleep = async () => {};')
   .replace('import { ipQuotaKey } from "../lib/ip.js";', 'const ipQuotaKey = () => globalThis.trialTest.ip;')
   .replace('import { requireUser } from "../lib/auth.js";', 'const requireUser = async () => globalThis.trialTest.user;')
@@ -160,4 +161,30 @@ test('Google array-wrapped invalid API key errors are classified without exposin
   const details = classifyProviderFailure('gemini', 400, { error: { message: 'redacted', details: [{ reason: 'API_KEY_INVALID' }] } });
   assert.equal(details.code, 'PROVIDER_401');
   assert.equal(classifyProviderFailure('gemini', 400, null).code, 'PROVIDER_400');
+});
+
+test('the full Gemini tailoring pipeline uses the native endpoint and normalizes its response', async () => {
+  const nativeSource = source.replace(/const PROVIDERS = \[[\s\S]*?\n\];/, 'const PROVIDERS = [{name: "gemini", model: "gemini-3.8-flash", key: "test-only"}];');
+  const { default: nativeHandler } = await import('data:text/javascript;base64,' + Buffer.from(nativeSource).toString('base64'));
+  const saved = globalThis.fetch;
+  try {
+    const env = setup();
+    let calls = 0;
+    globalThis.fetch = async (url, options) => {
+      calls++;
+      assert.match(url, /models\/gemini-3\.8-flash:generateContent$/);
+      assert.equal(options.headers['x-goog-api-key'], 'test-only');
+      const input = JSON.parse(options.body);
+      assert.equal(input.generationConfig.responseMimeType, 'application/json');
+      const system = input.systemInstruction.parts[0].text;
+      const output = system === 'analyze' ? { keywords: ['SQL'] } : system === 'tailor' ? { name: 'Native Result', experience: [] } : {};
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(output) }] } }] }) };
+    };
+    const res = { code: 200, setHeader() {}, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+    await nativeHandler({ method: 'POST', body: body(1) }, res);
+    assert.equal(res.code, 200);
+    assert.equal(res.body.tailored.name, 'Native Result');
+    assert.equal(calls, 3);
+    assert.equal(env.jobs.size, 1);
+  } finally { globalThis.fetch = saved; delete globalThis.trialTest; }
 });
