@@ -9,7 +9,7 @@ const source = (await readFile(new URL('../api/claude.js', import.meta.url), 'ut
   .replace('import { requireUser } from "../lib/auth.js";', 'const requireUser = async () => globalThis.trialTest.user;')
   .replace('import { adminClient, getAccount, isApproved } from "../lib/access.js";', 'const adminClient = () => globalThis.trialTest.db; const getAccount = async () => globalThis.trialTest.account; const isApproved = a => a.is_admin || a.status === "approved";')
   .replace('import { SYS_JD, SYS_TAILOR, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_JD = "analyze", SYS_TAILOR = "tailor", SYS_ASSESS = "assess";');
-const { default: handler, parseModelJSON, fetchTimeout } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const { default: handler, parseModelJSON, fetchTimeout, classifyProviderFailure } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const originalFetch = globalThis.fetch;
 function setup(status = 'trial') {
   const jobs = new Map(); let calls = 0;
@@ -150,4 +150,14 @@ test('provider timeout stays active while downloading the response body', async 
     }) });
     await assert.rejects(fetchTimeout('https://example.invalid', {}, 25), { code: 'PROVIDER_TIMEOUT' });
   } finally { globalThis.fetch = saved; }
+});
+
+test('Google array-wrapped invalid API key errors are classified without exposing provider text', () => {
+  const failure = classifyProviderFailure('gemini', 400, [{ error: { code: 400, status: 'INVALID_ARGUMENT', message: 'Please pass a valid API key' } }]);
+  assert.equal(failure.code, 'PROVIDER_401');
+  assert.equal(failure.httpStatus, 400);
+  assert.match(failure.message, /rejected the API key/);
+  const details = classifyProviderFailure('gemini', 400, { error: { message: 'redacted', details: [{ reason: 'API_KEY_INVALID' }] } });
+  assert.equal(details.code, 'PROVIDER_401');
+  assert.equal(classifyProviderFailure('gemini', 400, null).code, 'PROVIDER_400');
 });
