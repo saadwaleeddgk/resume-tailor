@@ -169,3 +169,14 @@ completed jobs resets their quota contribution; keep counts when designing data 
 Automated tests mock Supabase/provider responses and test IP normalization/header trust.
 The migration and real cross-account database concurrency must also be verified against
 your development Supabase project before production rollout.
+
+### Select the intended AI provider
+
+Set server-only `AI_PROVIDER=gemini` to use only the configured `GEMINI_API_KEY`.
+Other choices are `openai`, `groq`, or `gpt`. Without AI_PROVIDER the enabled providers
+are tried in order. A GITHUB_TOKEN alone no longer enables GitHub Models: set
+`ENABLE_GITHUB_MODELS=true` only if that token is intentionally configured for model access.
+This avoids using repository/deployment tokens as AI credentials. Diagnostics retain
+safe failure codes from each attempted provider so a later fallback cannot hide an
+earlier provider rejection. Set these variables in Vercel Production and redeploy;
+changing local .env does not update the hosted runtime.

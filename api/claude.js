@@ -48,16 +48,28 @@ export async function fetchTimeout(url, opts, ms) {
     }
   } finally { clearTimeout(t); }
 }
+export function selectProviders(providers, env = process.env) {
+  const selected = env.AI_PROVIDER?.trim().toLowerCase();
+  return providers.filter(provider => provider.key &&
+    (provider.name !== "gpt" || env.ENABLE_GITHUB_MODELS === "true") &&
+    (!selected || provider.name === selected));
+}
 async function callLLM(body, deadline = Date.now() + 240000) {
-  let lastResponse, lastProvider, lastFailure, lastProviderFailure;
   const disabled = new Set();
-  const active = PROVIDERS.filter(p => p.key);
-  if (!active.length) return { error: "No API keys configured in the project settings." };
-  const tried = [];
+  const active = selectProviders(PROVIDERS);
+  if (!active.length) return { error: process.env.AI_PROVIDER ? "No enabled API key matches AI_PROVIDER. Choose gemini, openai, groq, or explicitly enabled gpt, and check Vercel Production environment variables." : "No AI API keys are configured. GitHub Models requires explicit ENABLE_GITHUB_MODELS=true." };
+  const failures = new Map();
+  const failed = () => {
+    const errors = Array.from(failures.values());
+    // Prefer an actionable HTTP/key/model rejection over a later broken fallback body.
+    const error = errors.find(item => /^PROVIDER_[45][0-9]{2}$/.test(item.code)) || errors[errors.length - 1] || generationError("PROVIDER_TIMEOUT", "The AI generation deadline was reached. Please try again.");
+    error.attempts = errors.map(item => ({ provider: item.provider, code: item.code, httpStatus: item.httpStatus, responseType: item.contentType, transportCode: item.transportCode }));
+    return { failure: error };
+  };
   for (let round = 0; round < ROUNDS; round++) {
     for (const p of active) {
       if (disabled.has(p.name)) continue;
-      if (Date.now() >= deadline) return { failure: lastFailure || generationError("PROVIDER_TIMEOUT", "The AI generation deadline was reached. Please try again."), tried };
+      if (Date.now() >= deadline) return failed();
       try {
         const request = p.name === "gemini" ? buildGeminiRequest(body, p.model, p.key) : {
           url: p.endpoint,
@@ -74,31 +86,24 @@ async function callLLM(body, deadline = Date.now() + 240000) {
         const embeddedStatus = Number(embeddedError?.code);
         const r = response.ok && embeddedError ? { ok: false, status: embeddedStatus >= 400 && embeddedStatus <= 599 ? embeddedStatus : 502, headers: response.headers } : response;
         if (!r.ok) {
-          lastResponse = r; lastProvider = p.name; lastFailure = null;
-          lastProviderFailure = classifyProviderFailure(p.name, r.status, data);
-          if (r.status !== 429 && r.status < 500) {
-            tried.push(`${p.name}:${r.status}`); disabled.add(p.name); continue;
-          }
-          const ra = parseInt(r.headers.get("retry-after") || "0", 10);
-          tried.push(`${p.name}:${r.status}`);
-          if (ra > 0 && ra <= 10) await sleep(ra * 1000);
+          const failure = classifyProviderFailure(p.name, r.status, data);
+          failures.set(p.name, failure);
+          if (r.status !== 429 && r.status < 500) { disabled.add(p.name); continue; }
+          const retryAfter = parseInt(r.headers?.get("retry-after") || "0", 10);
+          if (retryAfter > 0 && retryAfter <= 10) await sleep(Math.min(retryAfter * 1000, Math.max(0, deadline - Date.now())));
           continue;
         }
         return { r, data, provider: p.name };
       } catch (error) {
-        const code = error.code || "PROVIDER_NETWORK";
-        tried.push(p.name + ":" + code);
-        lastResponse = null;
-        lastFailure = error.code ? error : generationError("PROVIDER_NETWORK", "The AI provider connection failed after automatic retries. Please try again shortly.");
-        lastFailure.provider = p.name;
+        const failure = error.code ? error : generationError("PROVIDER_NETWORK", "The AI provider connection failed after automatic retries. Please try again shortly.");
+        failure.provider = p.name;
+        failures.set(p.name, failure);
       }
     }
     if (disabled.size === active.length) break;
-    if (round < ROUNDS - 1) await sleep(2000 + round * 3000);
+    if (round < ROUNDS - 1) await sleep(Math.min(2000 + round * 3000, Math.max(0, deadline - Date.now())));
   }
-  if (lastFailure) return { failure: lastFailure, tried };
-  if (lastResponse) return { r: lastResponse, provider: lastProvider, failure: lastProviderFailure, tried };
-  return { error: "AI providers could not be reached before the deadline.", tried };
+  return failed();
 }
 function generationError(code, message, details = {}) {
   return Object.assign(new Error(message), { code, ...details });
@@ -176,7 +181,7 @@ function publicFailure(error, stage) {
 }
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
-  res.setHeader("X-Resume-API-Version", "gemini-native-20261022");
+  res.setHeader("X-Resume-API-Version", "provider-selection-20261022");
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
   const user = await requireUser(req, res);
   if (!user) return;
@@ -230,13 +235,14 @@ export default async function handler(req, res) {
     }
     const failure = publicFailure(error, stage);
     // Never log resumes, prompts, keys, or raw provider/database response bodies.
-    console.error("Generation failed:", { stage, code: failure.code, databaseCode: error.code, provider: error.provider, httpStatus: error.httpStatus, contentType: error.contentType, transportCode: error.transportCode, jobId });
+    console.error("Generation failed:", { stage, code: failure.code, databaseCode: error.code, provider: error.provider, httpStatus: error.httpStatus, contentType: error.contentType, transportCode: error.transportCode, attempts: error.attempts, jobId });
     return res.status(503).json({ ...failure, stage, diagnostic: {
-      apiVersion: "gemini-native-20261022",
+      apiVersion: "provider-selection-20261022",
       provider: error.provider,
       httpStatus: error.httpStatus,
       responseType: error.contentType,
       transportCode: error.transportCode,
+      attempts: error.attempts,
     } });
   }
 }

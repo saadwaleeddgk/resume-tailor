@@ -10,7 +10,7 @@ const source = (await readFile(new URL('../api/claude.js', import.meta.url), 'ut
   .replace('import { requireUser } from "../lib/auth.js";', 'const requireUser = async () => globalThis.trialTest.user;')
   .replace('import { adminClient, getAccount, isApproved } from "../lib/access.js";', 'const adminClient = () => globalThis.trialTest.db; const getAccount = async () => globalThis.trialTest.account; const isApproved = a => a.is_admin || a.status === "approved";')
   .replace('import { SYS_JD, SYS_TAILOR, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_JD = "analyze", SYS_TAILOR = "tailor", SYS_ASSESS = "assess";');
-const { default: handler, parseModelJSON, fetchTimeout, classifyProviderFailure } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const { default: handler, parseModelJSON, fetchTimeout, classifyProviderFailure, selectProviders } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const originalFetch = globalThis.fetch;
 function setup(status = 'trial') {
   const jobs = new Map(); let calls = 0;
@@ -187,4 +187,38 @@ test('the full Gemini tailoring pipeline uses the native endpoint and normalizes
     assert.equal(calls, 3);
     assert.equal(env.jobs.size, 1);
   } finally { globalThis.fetch = saved; delete globalThis.trialTest; }
+});
+
+test('GitHub tokens are not used for AI without explicit opt-in, and provider selection is enforced', () => {
+  const providers = [{ name: 'gemini', key: 'test-gemini' }, { name: 'gpt', key: 'github-repository-token' }];
+  assert.deepEqual(selectProviders(providers, {}).map(p => p.name), ['gemini']);
+  assert.deepEqual(selectProviders(providers, { ENABLE_GITHUB_MODELS: 'true' }).map(p => p.name), ['gemini', 'gpt']);
+  assert.deepEqual(selectProviders(providers, { ENABLE_GITHUB_MODELS: 'true', AI_PROVIDER: 'gemini' }).map(p => p.name), ['gemini']);
+  assert.equal(selectProviders(providers, { AI_PROVIDER: 'openai' }).length, 0);
+});
+
+test('a plain-text GitHub fallback cannot mask an earlier Gemini rejection', async () => {
+  const previousEnabled = process.env.ENABLE_GITHUB_MODELS;
+  const previousSelected = process.env.AI_PROVIDER;
+  const savedFetch = globalThis.fetch;
+  try {
+    process.env.ENABLE_GITHUB_MODELS = 'true'; delete process.env.AI_PROVIDER;
+    const mixedSource = source.replace(/const PROVIDERS = \[[\s\S]*?\n\];/, 'const PROVIDERS = [{name: "gemini", model: "gemini-3.8-flash", key: "test-gemini"}, {name: "gpt", endpoint: "https://example.invalid/github", model: "test-model", key: "test-github"}];');
+    const { default: mixedHandler } = await import('data:text/javascript;base64,' + Buffer.from(mixedSource).toString('base64'));
+    setup();
+    globalThis.fetch = async url => url.includes('generativelanguage')
+      ? { status: 403, ok: false, json: async () => ({ error: { code: 403 } }) }
+      : { status: 200, ok: true, headers: new Headers({ 'content-type': 'text/plain' }), json: async () => { throw new SyntaxError('private upstream error'); } };
+    const res = { code: 200, setHeader() {}, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+    await mixedHandler({ method: 'POST', body: body(1) }, res);
+    assert.equal(res.body.code, 'PROVIDER_403');
+    assert.equal(res.body.diagnostic.provider, 'gemini');
+    assert.deepEqual(res.body.diagnostic.attempts.map(item => item.provider), ['gemini','gpt']);
+    assert.equal(res.body.diagnostic.attempts[1].responseType, 'text/plain');
+    assert.doesNotMatch(JSON.stringify(res.body), /private upstream error|test-github|test-gemini/);
+  } finally {
+    globalThis.fetch = savedFetch; delete globalThis.trialTest;
+    if (previousEnabled === undefined) delete process.env.ENABLE_GITHUB_MODELS; else process.env.ENABLE_GITHUB_MODELS = previousEnabled;
+    if (previousSelected === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = previousSelected;
+  }
 });
