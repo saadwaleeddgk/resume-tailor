@@ -180,3 +180,27 @@ This avoids using repository/deployment tokens as AI credentials. Diagnostics re
 safe failure codes from each attempted provider so a later fallback cannot hide an
 earlier provider rejection. Set these variables in Vercel Production and redeploy;
 changing local .env does not update the hosted runtime.
+
+### Forgot password with email OTP
+
+The trial entry page and password sign-in form both include **Forgot password?**.
+Users request a recovery email, enter its OTP, and only then choose matching passwords
+(10–128 characters). Supabase verifies the OTP with type `recovery`; password updates
+use an isolated in-memory auth client so recovery cannot redirect into the editor before
+the reset finishes. Passwords and recovery tokens are not persisted by this flow. The
+same user ID is retained; credit counts, IP limits, and approval flags are not updated.
+
+Required dashboard setup:
+1. Open Supabase Authentication -> Emails -> **Reset password**.
+2. Set the subject to **Your Resume Tailor password reset code**.
+3. Replace the body with [reset-password.html](supabase/templates/reset-password.html),
+   or your own design containing `{{ .Token }}`. Use a code rather than `{{ .ConfirmationURL }}`.
+4. Save. Keep custom SMTP enabled and allow the local/production redirect origins already used by sign-in.
+
+Test an existing account locally: request reset, try an incorrect code (must fail), enter
+the real code, try mismatching passwords (must fail), save a valid new password, and sign
+in using it. Confirm credits and approval status are unchanged. Request a fresh code to
+test expiry/resend behavior. Automated tests mock Auth; real SMTP delivery needs this
+manual check. No database migration or service-role reset endpoint is required.
+
+Reference: https://supabase.com/docs/reference/javascript/auth-resetpasswordforemail

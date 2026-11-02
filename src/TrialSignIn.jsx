@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export default function TrialSignIn({ supabase, onSignIn }) {
+export default function TrialSignIn({ supabase, onSignIn, onForgot }) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
@@ -35,6 +35,6 @@ export default function TrialSignIn({ supabase, onSignIn }) {
       {sent && <><label className="rb-lbl" htmlFor="trial-code">Verification code</label><input id="trial-code" className="rb-in" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" maxLength={10} value={code} onChange={e => setCode(e.target.value)} /></>}
       <button className="rb-btn rb-btn-pri" style={{ marginTop: 12 }} disabled={busy || (!sent && cooldown > 0)}>{busy ? 'Please wait...' : sent ? 'Verify and enter' : 'Send verification code'}</button>
       {sent && <><button type="button" className="rb-btn rb-btn-ghost" onClick={send} disabled={busy || cooldown > 0}>{cooldown ? 'Resend in ' + cooldown + 's' : 'Resend code'}</button><button type="button" className="rb-btn rb-btn-ghost" disabled={busy} onClick={() => { setSent(false); setCode(''); }}>Change email</button></>}
-    </form><p className="rb-hint" role="status">{message}</p><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={onSignIn}>Sign in with password</button>
+    </form><p className="rb-hint" role="status">{message}</p><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={onSignIn}>Sign in with password</button><button className="rb-btn rb-btn-ghost rb-btn-sm" disabled={busy} onClick={onForgot}>Forgot password?</button>
   </div></div></div>;
 }

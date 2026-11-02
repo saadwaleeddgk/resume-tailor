@@ -1,3 +1,4 @@
+import ForgotPassword from "./ForgotPassword.jsx";
 import TrialSignIn from "./TrialSignIn.jsx";
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
@@ -55,9 +56,10 @@ export default function AccessShell({ supabase, children }) {
     return () => { active = false; clearInterval(timer); };
   }, [session, api]);
   if (!supabase) return <Card><h2>Sign-in setup required</h2><p>Configure the Supabase URL and public key.</p></Card>;
+  if (panel === 'forgot') return <ForgotPassword onBack={() => setPanel('login')} />;
   if (session === undefined) return <Card><h2>Checking your session...</h2></Card>;
   if (!session) return <>
-    {panel === 'login' ? <Card><Login supabase={supabase} done={() => setPanel('')} /><button className="rb-btn rb-btn-ghost" onClick={() => setPanel('')}>Start a free trial</button></Card> : <TrialSignIn supabase={supabase} onSignIn={() => setPanel('login')} />}
+    {panel === 'login' ? <Card><Login supabase={supabase} onForgot={() => setPanel('forgot')} done={() => setPanel('')} /><button className="rb-btn rb-btn-ghost" onClick={() => setPanel('')}>Start a free trial</button></Card> : <TrialSignIn supabase={supabase} onForgot={() => setPanel('forgot')} onSignIn={() => setPanel('login')} />}
     {error && <Card><p role="alert">{error}</p></Card>}
   </>;
   if (!account || account.user_id !== session.user.id) return <Card><h2>{error ? 'Access setup needed' : 'Loading your allowance...'}</h2><p role="alert">{error}</p><button className="rb-btn rb-btn-ghost" onClick={() => window.location.reload()}>Retry</button></Card>;
@@ -78,7 +80,7 @@ export default function AccessShell({ supabase, children }) {
         {error && <p className="rb-err" role="alert">{error}</p>}
       </div></div>
       {panel === 'register' && <Registration supabase={supabase} session={session} api={api} done={async () => { setPanel(''); await refresh(); }} />}
-      {panel === 'login' && <Login supabase={supabase} done={() => { setPanel(''); refresh(); }} />}
+      {panel === 'login' && <Login supabase={supabase} onForgot={() => setPanel('forgot')} done={() => { setPanel(''); refresh(); }} />}
       {panel === 'admin' && account.is_admin && <Admin api={api} />}
     </div>
     {children(session.user, account, refresh)}
@@ -136,7 +138,7 @@ function Registration({ supabase, session, api, done }) {
     </form><p className="rb-hint" role="status">{message}</p>
   </div></div>;
 }
-function Login({ supabase, done }) {
+function Login({ supabase, done, onForgot }) {
   const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [code, setCode] = useState('');
   const [sent, setSent] = useState(false); const [busy, setBusy] = useState(false); const [message, setMessage] = useState('');
   const submit = async () => {
@@ -164,7 +166,7 @@ function Login({ supabase, done }) {
     {sent ? <><label className="rb-lbl" htmlFor="login-code">Verification code</label><input id="login-code" className="rb-in" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" value={code} onChange={e => setCode(e.target.value)} /></> : <><label className="rb-lbl" htmlFor="login-password">Password</label><input id="login-password" className="rb-in" type="password" required value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" /></>}
     <button className="rb-btn rb-btn-pri" disabled={busy} style={{ marginTop: 12 }}>{busy ? 'Please wait…' : sent ? 'Verify and sign in' : 'Continue'}</button>
     {sent && <button type="button" className="rb-btn rb-btn-ghost" disabled={busy} onClick={() => { setSent(false); setCode(''); }}>Start again</button>}
-  </form><p className="rb-hint" role="status">{message}</p></div></div>;
+  </form><p className="rb-hint" role="status">{message}</p><button className="rb-btn rb-btn-ghost rb-btn-sm" type="button" disabled={busy} onClick={onForgot}>Forgot password?</button></div></div>;
 }
 function Admin({ api }) {
   const [users, setUsers] = useState([]); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
