@@ -18,6 +18,13 @@ test('native Gemini requests use Google authentication, system instructions and 
   assert.equal(plain.generationConfig.responseMimeType, undefined);
   assert.deepEqual(plain.generationConfig.thinkingConfig, { thinkingBudget: 1024 });
 });
+test('GEMINI_THINKING overrides reasoning depth and ignores invalid values', () => {
+  const config = (model, thinking) => JSON.parse(buildGeminiRequest({ max_tokens: 100, messages: [] }, model, 'test', thinking).options.body).generationConfig.thinkingConfig;
+  assert.deepEqual(config('gemini-3.8-flash', 'minimal'), { thinkingLevel: 'MINIMAL' });
+  assert.deepEqual(config('gemini-3.8-flash', 'bogus'), { thinkingLevel: 'LOW' });
+  assert.deepEqual(config('gemini-2.5-flash', 'minimal'), { thinkingBudget: 0 });
+  assert.deepEqual(config('gemini-2.5-pro', 'minimal'), { thinkingBudget: 128 });
+});
 test('native responses preserve text, truncation, blocking, and errors', () => {
   const data = normalizeGeminiResponse({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'private reasoning', thought: true }, { text: '{"keywords":' }, { text: '["SQL"]}' }] } }] });
   assert.equal(data.choices[0].message.content, '{"keywords":["SQL"]}');

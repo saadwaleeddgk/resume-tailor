@@ -517,6 +517,17 @@ async function tailorResume(master, jd) {
   pendingTailor = null;
   return result;
 }
+async function assessResume(jobId) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error("Your trial session expired. Reload to continue.");
+  const response = await fetch("/api/claude", {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + session.access_token },
+    body: JSON.stringify({ action: "assess", jobId }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Could not check role fit.");
+  return result.assess || {};
+}
 function parseJSON(s){
   if(!s) return null;
   let t = s.trim().replace(/^```(?:json)?/i, "").replace(/```$/,"").trim();
@@ -1349,6 +1360,7 @@ function ResumeApp({ userId, account, onUsageChange }){
   const [showSug, setShowSug] = useState(false);     // show inline suggestions on the resume tab
 
   const [versions, setVersions] = useState([]);
+  const [assessBusy, setAssessBusy] = useState(false);
   const [currentVid, setCurrentVid] = useState(null); // id of the history entry for this session
   const [cmp, setCmp] = useState([]); // up to 2 version ids to compare
 
@@ -1461,13 +1473,21 @@ function ResumeApp({ userId, account, onUsageChange }){
     if (!account.is_admin && account.status !== "approved" && (account.status !== "trial" || account.remaining === 0)) { setError(account.accountRemaining > 0 && account.ipRemaining === 0 ? "This network has used its daily free allowance. Try after the reset time or request admin approval." : "Your account trial is complete. Request admin approval to continue tailoring."); return; }
     setBusy(true); setError(""); setResult(null); setCover(""); setOutreach(null); setPrep(null); setPages(null); setEditedHTML(null); setEditing(false); setSuggestions([]); setAcceptedSugs([]); setRejectedIds([]); setShowSug(false);
     try {
-      setStage("Analyzing the role, tailoring your resume, and checking fit");
-      const { analysis, tailored, assess } = await tailorResume(master, jd);
+      setStage("Analyzing the role and tailoring your resume");
+      const { analysis, tailored, assess = {}, jobId } = await tailorResume(master, jd);
       const coverage = buildCoverage(analysis, tailored);
       const scores = buildScores(coverage, assess);
       const res = { analysis, tailored, assess, coverage, scores };
       setResult(res);
       setTab("resume"); setView("recruiter");
+      // Fit scoring finishes in the background; keyword coverage drives the score until it arrives.
+      if (jobId && !Object.keys(assess).length) {
+        setAssessBusy(true);
+        assessResume(jobId)
+          .then(next => setResult(prev => prev && prev.tailored === tailored ? { ...prev, assess: next, scores: buildScores(prev.coverage, next) } : prev))
+          .catch(() => { /* keyword scoring remains available */ })
+          .finally(() => setAssessBusy(false));
+      }
 
       const at = Date.now();
       setCurrentVid(at);
@@ -1965,6 +1985,7 @@ function ResumeApp({ userId, account, onUsageChange }){
                       <Gauge value={ats ? ats.score : 0} label="ATS score" sub="Parser compatibility" Icon={ShieldCheck} />
                       <Gauge value={cov.coverage} label="Keyword coverage" sub={`${cov.covered.length}/${cov.total} terms`} Icon={ScanLine} />
                     </div>
+                    {assessBusy && <div className="rb-pageinfo no-print"><Loader2 size={13} className="spin" /> Checking role fit and requirements…</div>}
 
                     <div className="rb-sec">
                       <h4><ScanLine size={15} /> Keyword coverage <span className="cnt">{cov.covered.length}/{cov.total}</span></h4>

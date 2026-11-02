@@ -1,4 +1,4 @@
-﻿import { test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -9,7 +9,7 @@ const source = (await readFile(new URL('../api/claude.js', import.meta.url), 'ut
   .replace('import { ipQuotaKey } from "../lib/ip.js";', 'const ipQuotaKey = () => globalThis.trialTest.ip;')
   .replace('import { requireUser } from "../lib/auth.js";', 'const requireUser = async () => globalThis.trialTest.user;')
   .replace('import { adminClient, getAccount, isApproved } from "../lib/access.js";', 'const adminClient = () => globalThis.trialTest.db; const getAccount = async () => globalThis.trialTest.account; const isApproved = a => a.is_admin || a.status === "approved";')
-  .replace('import { SYS_JD, SYS_TAILOR, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_JD = "analyze", SYS_TAILOR = "tailor", SYS_ASSESS = "assess";');
+  .replace('import { SYS_ANALYZE_TAILOR, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_ANALYZE_TAILOR = "tailor", SYS_ASSESS = "assess";');
 const { default: handler, parseModelJSON, fetchTimeout, classifyProviderFailure, selectProviders } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const originalFetch = globalThis.fetch;
 function setup(status = 'trial') {
@@ -30,6 +30,10 @@ function setup(status = 'trial') {
         let id;
         const query = { eq(key, val) { if (key === 'id') id = val; return query; }, then(resolve) { jobs.set(id, { ...jobs.get(id), ...value }); resolve({ error: null }); } };
         return query;
+      }, select() {
+        const filters = {};
+        const query = { eq(key, val) { filters[key] = val; return query; }, async maybeSingle() { const job = jobs.get(filters.id); return { data: job?.owner === filters.user_id ? job : null, error: null }; } };
+        return query;
       } }; },
     },
   };
@@ -37,7 +41,7 @@ function setup(status = 'trial') {
   globalThis.fetch = async (_url, options) => {
     calls++;
     const system = JSON.parse(options.body).messages[0].content;
-    const content = system === 'analyze' ? { keywords: ['SQL'] } : system === 'tailor' ? { name: 'Test User', experience: [] } : {};
+    const content = system === 'tailor' ? { analysis: { keywords: ['SQL'] }, tailored: { name: 'Test User', experience: [] } } : { remainingGaps: ['None'] };
     return { status: 200, ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
   };
   return { state, jobs, calls: () => calls };
@@ -52,13 +56,13 @@ test('trial pipeline, replay, access locks, and failed generation accounting', a
   try {
     let env = setup();
     assert.equal((await request(body(1))).code, 200);
-    assert.equal(env.calls(), 3);
+    assert.equal(env.calls(), 1, 'analysis and tailoring share one AI call; scoring is deferred');
     assert.equal((await request(body(1))).code, 200);
-    assert.equal(env.calls(), 3, 'replaying the same job returns its result without another AI call');
+    assert.equal(env.calls(), 1, 'replaying the same job returns its result without another AI call');
     await Promise.all([2,3,4].map(n => request(body(n))));
     assert.equal(env.jobs.size, 4);
     assert.equal((await request(body(5))).code, 403);
-    assert.equal(env.calls(), 12, 'fifth resume never reaches the provider');
+    assert.equal(env.calls(), 4, 'fifth resume never reaches the provider');
     assert.equal((await request({ system: 'tailor anything', messages: [] })).code, 403, 'trial cannot bypass quota with the generic route');
     env.state.user.id = 'second-account';
     assert.equal((await request(body(1))).code, 429, 'another verified account on the same IP is blocked');
@@ -97,24 +101,24 @@ test('trial pipeline, replay, access locks, and failed generation accounting', a
       assert.deepEqual(input.response_format, { type: 'json_object' });
       budgets.push(input.max_tokens);
       const step = sequence++;
-      const content = step < 2 ? { keywords: ['SQL'] } : step === 2 ? { name: 'Recovered', experience: [] } : {};
+      const content = { analysis: { keywords: ['SQL'] }, tailored: { name: 'Recovered', experience: [] } };
       return { status: 200, ok: true, json: async () => ({ choices: [{ finish_reason: step === 0 ? 'length' : 'stop', message: { content: JSON.stringify(content) } }] }) };
     };
     const recovered = await request(body(1));
     assert.equal(recovered.code, 200);
-    assert.equal(budgets[1], budgets[0] * 2, 'truncated JSON is retried with more token budget');
+    assert.equal(budgets[1], Math.min(budgets[0] * 2, 16000), 'truncated JSON is retried with more token budget');
     assert.equal(env.jobs.size, 1, 'model retries reserve only one credit');
     env = setup();
     let reads = 0;
     globalThis.fetch = async (_url, options) => {
       const step = reads++;
       assert.equal(JSON.parse(options.body).stream, false);
-      if (step === 1) return { status: 200, ok: true, headers: new Headers({ 'content-type': 'text/html' }), json: async () => { throw new SyntaxError('private HTML payload'); } };
-      const content = step === 0 ? { keywords: ['SQL'] } : step === 2 ? { name: 'Recovered from interrupted body', experience: [] } : {};
+      if (step === 0) return { status: 200, ok: true, headers: new Headers({ 'content-type': 'text/html' }), json: async () => { throw new SyntaxError('private HTML payload'); } };
+      const content = { analysis: { keywords: ['SQL'] }, tailored: { name: 'Recovered from interrupted body', experience: [] } };
       return { status: 200, ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
     };
     assert.equal((await request(body(1))).code, 200, 'interrupted HTTP body during tailoring is retried');
-    assert.equal(reads, 4);
+    assert.equal(reads, 2);
     assert.equal(env.jobs.size, 1);
     assert.equal([...env.jobs.values()][0].state, 'completed');
     env = setup();
@@ -129,11 +133,32 @@ test('trial pipeline, replay, access locks, and failed generation accounting', a
     globalThis.fetch = async () => ({ status: 401, ok: false });
     const badKey = await request(body(1));
     assert.equal(badKey.body.code, 'PROVIDER_401');
-    assert.equal(badKey.body.stage, 'job analysis');
+    assert.equal(badKey.body.stage, 'resume tailoring');
     assert.match(badKey.body.error, /API key/);
     assert.equal((await request(body(1), 'GET')).code, 405);
     assert.equal((await request({ ...body(2), master: '' })).code, 400);
   } finally { globalThis.fetch = originalFetch; delete globalThis.trialTest; delete process.env.OPENAI_API_KEY; }
+});
+
+test('fit assessment runs after tailoring, only for the owner, and is cached', async () => {
+  try {
+    const env = setup();
+    const tailored = await request(body(1));
+    assert.equal(tailored.code, 200);
+    assert.deepEqual(tailored.body.assess, {}, 'the resume is returned before scoring');
+    assert.match(tailored.body.jobId, /^[0-9a-f-]{36}$/);
+    const scored = await request({ action: 'assess', jobId: tailored.body.jobId });
+    assert.equal(scored.code, 200);
+    assert.deepEqual(scored.body.assess, { remainingGaps: ['None'] });
+    assert.equal(env.calls(), 2);
+    assert.equal((await request({ action: 'assess', jobId: tailored.body.jobId })).code, 200);
+    assert.equal(env.calls(), 2, 'a stored assessment is reused without another AI call');
+    assert.deepEqual((await request(body(1))).body.assess, { remainingGaps: ['None'] }, 'replays include the saved assessment');
+    env.state.user.id = 'someone-else';
+    assert.equal((await request({ action: 'assess', jobId: tailored.body.jobId })).code, 404, 'another user cannot score this job');
+    assert.equal((await request({ action: 'assess', jobId: 'not-a-job' })).code, 400);
+    assert.equal(env.calls(), 2);
+  } finally { globalThis.fetch = originalFetch; delete globalThis.trialTest; }
 });
 
 test('model JSON handles fences and trailing commas without changing quoted resume content', () => {
@@ -177,14 +202,14 @@ test('the full Gemini tailoring pipeline uses the native endpoint and normalizes
       const input = JSON.parse(options.body);
       assert.equal(input.generationConfig.responseMimeType, 'application/json');
       const system = input.systemInstruction.parts[0].text;
-      const output = system === 'analyze' ? { keywords: ['SQL'] } : system === 'tailor' ? { name: 'Native Result', experience: [] } : {};
+      const output = system === 'tailor' ? { analysis: { keywords: ['SQL'] }, tailored: { name: 'Native Result', experience: [] } } : {};
       return { ok: true, status: 200, json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(output) }] } }] }) };
     };
     const res = { code: 200, setHeader() {}, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
     await nativeHandler({ method: 'POST', body: body(1) }, res);
     assert.equal(res.code, 200);
     assert.equal(res.body.tailored.name, 'Native Result');
-    assert.equal(calls, 3);
+    assert.equal(calls, 1);
     assert.equal(env.jobs.size, 1);
   } finally { globalThis.fetch = saved; delete globalThis.trialTest; }
 });

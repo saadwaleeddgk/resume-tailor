@@ -3,7 +3,7 @@ import { ipQuotaKey } from "../lib/ip.js";
 export const maxDuration = 300;
 import { requireUser } from "../lib/auth.js";
 import { adminClient, getAccount, isApproved } from "../lib/access.js";
-import { SYS_JD, SYS_TAILOR, SYS_ASSESS } from "../lib/prompts.js";
+import { SYS_ANALYZE_TAILOR, SYS_ASSESS } from "../lib/prompts.js";
 import { createHash } from "node:crypto";
 
 const PROVIDERS = [
@@ -155,7 +155,8 @@ async function generateJSON(system, content, tokens, deadline) {
     if (!r.ok) throw failure || providerFailure(provider, r.status);
     const choice = body?.choices?.[0];
     if (choice?.finish_reason === "length") {
-      if (attempt === 0 && Date.now() < deadline) { budget *= 2; continue; }
+      // 16000 stays under gpt-4o-mini's 16,384 output-token ceiling.
+      if (attempt === 0 && Date.now() < deadline) { budget = Math.min(budget * 2, 16000); continue; }
       throw generationError("MODEL_TRUNCATED", "The AI response reached its token limit. Try a shorter source resume or retry.", { provider });
     }
     if (choice?.finish_reason === "content_filter" || choice?.message?.refusal) throw generationError("MODEL_BLOCKED", "The AI provider declined this content. Review the resume and job description.", { provider });
@@ -201,24 +202,35 @@ export default async function handler(req, res) {
       if (error) throw error;
       if (!slot || typeof slot !== "object") throw new Error("Invalid quota response");
       if (slot.error) return res.status(slot.busy ? 409 : slot.code === "IP_DAILY_LIMIT" ? 429 : 403).json({ error: slot.error, code: slot.code, resetAt: slot.resetAt });
-      if (slot.result) return res.json(slot.result);
+      if (slot.result) return res.json({ ...slot.result, jobId });
       reserved = true;
       const deadline = Date.now() + 240000;
-      stage = "job analysis";
-      const analysis = await generateJSON(SYS_JD, body.jd, 2500, deadline);
-      if (!Array.isArray(analysis.keywords)) throw generationError("MODEL_SCHEMA", "The AI job analysis is missing keywords. Please retry.");
       stage = "resume tailoring";
-      const tailored = await generateJSON(SYS_TAILOR, "MASTER RESUME:\n" + body.master + "\n\nJD ANALYSIS:\n" + JSON.stringify({ ...analysis, company: "" }), 8000, deadline);
-      if (typeof tailored.name !== "string" || !Array.isArray(tailored.experience)) throw generationError("MODEL_SCHEMA", "The AI resume response is missing the name or experience list. Please retry.");
-      // Scoring failure must not discard an otherwise completed resume.
-      let assess = {};
-      try { assess = await generateJSON(SYS_ASSESS, "JD ANALYSIS:\n" + JSON.stringify(analysis) + "\n\nTAILORED RESUME:\n" + JSON.stringify(tailored), 4000, deadline); } catch { /* keyword scoring remains available */ }
-      const result = { analysis, tailored, assess };
+      const { analysis, tailored } = await generateJSON(SYS_ANALYZE_TAILOR, "JOB DESCRIPTION:\n" + body.jd + "\n\nMASTER RESUME:\n" + body.master, 10500, deadline);
+      if (!Array.isArray(analysis?.keywords)) throw generationError("MODEL_SCHEMA", "The AI job analysis is missing keywords. Please retry.");
+      if (typeof tailored?.name !== "string" || !Array.isArray(tailored.experience)) throw generationError("MODEL_SCHEMA", "The AI resume response is missing the name or experience list. Please retry.");
+      // Fit scoring runs afterwards via action "assess", so the resume is returned without waiting for it.
+      const result = { analysis, tailored, assess: {} };
       stage = "saving";
       const { error: saveError } = await adminClient().from("tailoring_jobs").update({ state: "completed", result }).eq("id",jobId).eq("user_id",user.id);
       if (saveError) throw saveError;
       reserved = false;
-      return res.json(result);
+      return res.json({ ...result, jobId });
+    }
+    if (body.action === "assess") {
+      // Only scores the caller's own completed job, using the stored resume, so it cannot be used as a free generic AI call.
+      if (!/^[0-9a-f-]{36}$/i.test(body.jobId || "")) return res.status(400).json({ error: "Provide a valid job ID." });
+      stage = "fit assessment";
+      const { data: job, error: loadError } = await adminClient().from("tailoring_jobs").select("state,result").eq("id", body.jobId).eq("user_id", user.id).maybeSingle();
+      if (loadError) throw loadError;
+      if (job?.state !== "completed" || !job.result?.tailored) return res.status(404).json({ error: "Tailored resume not found." });
+      if (job.result.assess && Object.keys(job.result.assess).length) return res.json({ assess: job.result.assess });
+      const { analysis, tailored } = job.result;
+      const assess = await generateJSON(SYS_ASSESS, "JD ANALYSIS:\n" + JSON.stringify(analysis) + "\n\nTAILORED RESUME:\n" + JSON.stringify(tailored), 4000, Date.now() + 120000);
+      stage = "saving";
+      const { error: saveError } = await adminClient().from("tailoring_jobs").update({ result: { ...job.result, assess } }).eq("id", body.jobId).eq("user_id", user.id);
+      if (saveError) throw saveError;
+      return res.json({ assess });
     }
     if (!isApproved(account) || user.is_anonymous) return res.status(403).json({ error: "This feature requires an approved account. Trial access includes four tailored resumes and exports." });
     if (!Array.isArray(body.messages) || body.messages.length > 20) return res.status(400).json({ error: "Invalid messages" });
