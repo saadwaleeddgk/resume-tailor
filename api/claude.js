@@ -3,7 +3,7 @@ import { ipQuotaKey } from "../lib/ip.js";
 export const maxDuration = 300;
 import { requireUser } from "../lib/auth.js";
 import { adminClient, getAccount, isApproved } from "../lib/access.js";
-import { SYS_ANALYZE_TAILOR, SYS_ASSESS } from "../lib/prompts.js";
+import { SYS_ANALYZE_TAILOR, SYS_EXPAND_BULLETS, SYS_ASSESS } from "../lib/prompts.js";
 import { createHash } from "node:crypto";
 
 const PROVIDERS = [
@@ -167,6 +167,27 @@ async function generateJSON(system, content, tokens, deadline) {
     }
   }
 }
+// First role needs 7-8 bullets, every other role at least 6 (see SYS_TAILOR rules 6 and 15).
+export function shortRoles(tailored) {
+  return (tailored.experience || []).map((entry, index) => ({ index, have: Array.isArray(entry?.bullets) ? entry.bullets.length : 0, need: index === 0 ? 7 : 6 }))
+    .filter(role => role.have < role.need);
+}
+async function enforceBulletCounts(tailored, analysis, master, deadline) {
+  const short = shortRoles(tailored);
+  if (!short.length) return tailored;
+  const expand = short.map(r => "index " + r.index + " (" + (tailored.experience[r.index].role || "role") + " at " + (tailored.experience[r.index].company || "employer") + "): has " + r.have + ", needs " + (r.index === 0 ? "7-8" : "at least 6")).join("\n");
+  // Expansion is best-effort: the tailored resume is still returned if this pass fails.
+  try {
+    const fix = await generateJSON(SYS_EXPAND_BULLETS, "MASTER RESUME:\n" + master + "\n\nJD ANALYSIS:\n" + JSON.stringify({ ...analysis, company: "" }) + "\n\nTAILORED SKILLS:\n" + JSON.stringify(tailored.coreSkills || []) + "\n\nTAILORED EXPERIENCE:\n" + JSON.stringify(tailored.experience) + "\n\nEXPAND:\n" + expand, 6000, deadline);
+    const experience = tailored.experience.map(entry => ({ ...entry }));
+    for (const item of Array.isArray(fix?.experience) ? fix.experience : []) {
+      const entry = experience[item?.index];
+      const bullets = Array.isArray(item?.bullets) ? item.bullets.filter(b => typeof b === "string" && b.trim()) : [];
+      if (entry && bullets.length > (entry.bullets || []).length) entry.bullets = bullets.slice(0, item.index === 0 ? 8 : bullets.length);
+    }
+    return { ...tailored, experience };
+  } catch { return tailored; }
+}
 function publicFailure(error, stage) {
   if (error.code === "AUTH_CONFIG_MISSING") return { code: error.code, error: error.message };
   if (["PGRST202", "42883"].includes(error.code)) return { code: "QUOTA_MIGRATION_REQUIRED", error: "Supabase quota functions are out of date. Run 20261021_verified_ip_limits.sql in the connected Supabase project, then retry." };
@@ -206,9 +227,10 @@ export default async function handler(req, res) {
       reserved = true;
       const deadline = Date.now() + 240000;
       stage = "resume tailoring";
-      const { analysis, tailored } = await generateJSON(SYS_ANALYZE_TAILOR, "JOB DESCRIPTION:\n" + body.jd + "\n\nMASTER RESUME:\n" + body.master, 10500, deadline);
+      const { analysis, tailored: draft } = await generateJSON(SYS_ANALYZE_TAILOR, "JOB DESCRIPTION:\n" + body.jd + "\n\nMASTER RESUME:\n" + body.master, 10500, deadline);
       if (!Array.isArray(analysis?.keywords)) throw generationError("MODEL_SCHEMA", "The AI job analysis is missing keywords. Please retry.");
-      if (typeof tailored?.name !== "string" || !Array.isArray(tailored.experience)) throw generationError("MODEL_SCHEMA", "The AI resume response is missing the name or experience list. Please retry.");
+      if (typeof draft?.name !== "string" || !Array.isArray(draft.experience)) throw generationError("MODEL_SCHEMA", "The AI resume response is missing the name or experience list. Please retry.");
+      const tailored = await enforceBulletCounts(draft, analysis, body.master, deadline);
       // Fit scoring runs afterwards via action "assess", so the resume is returned without waiting for it.
       const result = { analysis, tailored, assess: {} };
       stage = "saving";

@@ -9,8 +9,8 @@ const source = (await readFile(new URL('../api/claude.js', import.meta.url), 'ut
   .replace('import { ipQuotaKey } from "../lib/ip.js";', 'const ipQuotaKey = () => globalThis.trialTest.ip;')
   .replace('import { requireUser } from "../lib/auth.js";', 'const requireUser = async () => globalThis.trialTest.user;')
   .replace('import { adminClient, getAccount, isApproved } from "../lib/access.js";', 'const adminClient = () => globalThis.trialTest.db; const getAccount = async () => globalThis.trialTest.account; const isApproved = a => a.is_admin || a.status === "approved";')
-  .replace('import { SYS_ANALYZE_TAILOR, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_ANALYZE_TAILOR = "tailor", SYS_ASSESS = "assess";');
-const { default: handler, parseModelJSON, fetchTimeout, classifyProviderFailure, selectProviders } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+  .replace('import { SYS_ANALYZE_TAILOR, SYS_EXPAND_BULLETS, SYS_ASSESS } from "../lib/prompts.js";', 'const SYS_ANALYZE_TAILOR = "tailor", SYS_EXPAND_BULLETS = "expand", SYS_ASSESS = "assess";');
+const { default: handler, shortRoles, parseModelJSON, fetchTimeout, classifyProviderFailure, selectProviders } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const originalFetch = globalThis.fetch;
 function setup(status = 'trial') {
   const jobs = new Map(); let calls = 0;
@@ -158,6 +158,37 @@ test('fit assessment runs after tailoring, only for the owner, and is cached', a
     assert.equal((await request({ action: 'assess', jobId: tailored.body.jobId })).code, 404, 'another user cannot score this job');
     assert.equal((await request({ action: 'assess', jobId: 'not-a-job' })).code, 400);
     assert.equal(env.calls(), 2);
+  } finally { globalThis.fetch = originalFetch; delete globalThis.trialTest; }
+});
+
+test('roles below the bullet minimum are expanded in one extra call; a failed expansion keeps the draft', async () => {
+  const n = count => Array.from({ length: count }, (_, i) => 'bullet ' + i);
+  assert.deepEqual(shortRoles({ experience: [{ bullets: n(7) }, { bullets: n(6) }] }), []);
+  assert.deepEqual(shortRoles({ experience: [{ bullets: n(6) }, { bullets: n(5) }, { bullets: n(6) }, {}] }).map(r => r.index), [0, 1, 3]);
+  try {
+    const env = setup();
+    const systems = [];
+    globalThis.fetch = async (_url, options) => {
+      const input = JSON.parse(options.body);
+      const system = input.messages[0].content;
+      systems.push(system);
+      const content = system === 'tailor'
+        ? { analysis: { keywords: ['SQL'] }, tailored: { name: 'Short', experience: [{ role: 'A', bullets: n(7) }, { role: 'B', bullets: n(5) }, { role: 'C', bullets: n(3) }] } }
+        : { experience: [{ index: 1, bullets: n(6) }, { index: 2, bullets: n(6) }, { index: 0, bullets: n(2) }, { index: 9, bullets: n(6) }] };
+      if (system === 'expand') assert.match(input.messages[1].content, /index 1 \(B[^\n]*needs at least 6\nindex 2 \(C/);
+      return { status: 200, ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
+    };
+    const res = await request(body(1));
+    assert.deepEqual(systems, ['tailor', 'expand']);
+    assert.deepEqual(res.body.tailored.experience.map(e => e.bullets.length), [7, 6, 6], 'only short roles grow; a shorter or unknown entry is ignored');
+    assert.deepEqual([...env.jobs.values()][0].result.tailored.experience.map(e => e.bullets.length), [7, 6, 6], 'the saved result is the expanded one');
+    setup();
+    globalThis.fetch = async (_url, options) => JSON.parse(options.body).messages[0].content === 'tailor'
+      ? { status: 200, ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ analysis: { keywords: ['SQL'] }, tailored: { name: 'Draft', experience: [{ role: 'A', bullets: n(3) }] } }) } }] }) }
+      : { status: 400, ok: false, json: async () => ({}) };
+    const kept = await request(body(2));
+    assert.equal(kept.code, 200);
+    assert.equal(kept.body.tailored.experience[0].bullets.length, 3);
   } finally { globalThis.fetch = originalFetch; delete globalThis.trialTest; }
 });
 
